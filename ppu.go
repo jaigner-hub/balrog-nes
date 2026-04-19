@@ -373,6 +373,10 @@ func (p *PPU) evaluateSpritesForNextLine() {
 	}
 	count := 0
 	hasS0 := false
+	// Track which output slot each OAM sprite went into. Sprite 0 isn't
+	// always at slot 0 — if earlier OAM entries aren't on this scanline,
+	// sprite 0 could land at any slot (or not at all).
+	var slotIsS0 [8]bool
 	for i := 0; i < 64 && count < 8; i++ {
 		sy := int(p.oam[i*4]) + 1
 		if nextLine < sy || nextLine >= sy+spriteH {
@@ -384,9 +388,11 @@ func (p *PPU) evaluateSpritesForNextLine() {
 		p.secondaryOAM[count*4+3] = p.oam[i*4+3]
 		if i == 0 {
 			hasS0 = true
+			slotIsS0[count] = true
 		}
 		count++
 	}
+	p.sprIsS0 = slotIsS0
 	// Approximate sprite-overflow: set the flag if there are more than 8
 	// sprites on the next line. Real hardware has a specific buggy scan that
 	// can also set this falsely; we're going with the simpler version.
@@ -548,7 +554,7 @@ func (p *PPU) outputPixel() {
 	} else if bgC == 0 {
 		pal = p.palette[0x10+sprPal*4+sprC] & 0x3F
 	} else {
-		if sprSlot == 0 && p.spriteHasS0 && x != 255 {
+		if sprSlot >= 0 && p.sprIsS0[sprSlot] && p.spriteHasS0 && x != 255 {
 			p.status |= statSpr0
 		}
 		if sprAttr&0x20 != 0 {
@@ -641,11 +647,11 @@ func (p *PPU) Step() {
 			}
 		}
 		// MMC3 scanline counter clock: fire once per visible / pre-render
-		// scanline at a fixed PPU cycle (260, matching the first sprite
-		// fetch on standard MMC3 configurations). Cycle-position-stable,
-		// so IRQ handler scroll writes land on the same pixel every frame
-		// regardless of sprite-pattern variance.
-		if p.cycle == 260 && (visible || preRender) {
+		// scanline. Using cycle 280 (matching fogleman's working Go impl;
+		// slightly later than the "correct" 260 but consistently works for
+		// SMB3 etc. because it gives the IRQ handler a more predictable
+		// window before the next scanline starts).
+		if p.cycle == 280 && (visible || preRender) {
 			if sc, ok := p.cart.mapper.(scanlineCounter); ok {
 				sc.ClockScanline()
 			}
