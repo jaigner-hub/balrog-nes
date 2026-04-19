@@ -105,7 +105,13 @@ func (n *NES) StepFrame() {
 
 		if target < 240 && n.PPU.status&statSpr0 == 0 {
 			hitX := n.PPU.predictSprite0Hit(target)
-			if hitX >= 0 {
+			// Only trust mid-scanline split-rendering for the classic top
+			// status-bar scenario (sprite 0 within the top 48 scanlines, like
+			// SMB1 or Zelda). For games that use sprite 0 elsewhere — often as
+			// a regular gameplay sprite (e.g., SMB3 where Mario's own sprite
+			// can end up as sprite 0) — the split would corrupt scrolling
+			// without fixing anything meaningful.
+			if hitX >= 0 && target < 48 {
 				hitTarget := scanlineStart + uint64(hitX+1)/3
 				if hitTarget > scanlineEnd {
 					hitTarget = scanlineEnd
