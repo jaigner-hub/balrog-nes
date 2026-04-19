@@ -35,18 +35,13 @@ func NewNES(cart *Cart, sampleRate float64) *NES {
 	return n
 }
 
-// StepFrame runs CPU + PPU + APU until a full frame has been rendered.
-// Every CPU cycle ticks the PPU 3 times (that's the real 3:1 PPU:CPU ratio).
-// All MMC3 IRQ clocking happens inside the PPU via A12 rising edges on CHR
-// fetches — no scanline heuristics up here.
+// StepFrame runs CPU + PPU + APU until PPU.frame ticks over. Every CPU
+// cycle ticks the PPU 3 times (real 3:1 PPU:CPU ratio). All MMC3 IRQ
+// clocking happens inside the PPU via A12 rising edges on CHR fetches —
+// no scanline heuristics up here.
 func (n *NES) StepFrame() {
-	// Catch the pre-frame state: we're about to start a new frame whenever
-	// the PPU is at (0, 0) — it'll be there initially on the very first call
-	// and after every FrameDone from the previous StepFrame.
-	// Run until we cross into a new frame and then back to (0, 0).
-	started := false
-	for {
-		// Step CPU one instruction (or one stall cycle)
+	startFrame := n.PPU.frame
+	for n.PPU.frame == startFrame {
 		before := n.CPU.cycles
 		n.CPU.Step()
 		delta := int(n.CPU.cycles - before)
@@ -65,14 +60,6 @@ func (n *NES) StepFrame() {
 		}
 		if n.irqMapper != nil && n.irqMapper.IRQPending() {
 			n.CPU.IRQ()
-		}
-		// Frame boundary: we've seen PPU move out of (0,0) and back into it
-		if !started {
-			if n.PPU.scanline != 0 || n.PPU.cycle != 0 {
-				started = true
-			}
-		} else if n.PPU.scanline == 0 && n.PPU.cycle == 0 {
-			return
 		}
 	}
 }
