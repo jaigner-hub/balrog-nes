@@ -611,26 +611,34 @@ func (p *PPU) Step() {
 	}
 
 	if renderLine && renderingOn {
-		// BG fetches and shifts during cycles 1..256 and 321..336
+		// BG fetches and shifts during cycles 1..256 and 321..336. The fetch
+		// pipeline per 8-cycle slot:
+		//   cycle % 8 == 1: NT byte
+		//   cycle % 8 == 3: AT byte
+		//   cycle % 8 == 5: pattern lo
+		//   cycle % 8 == 7: pattern hi
+		//   cycle % 8 == 0 (i.e. end-of-slot, cycles 8, 16, ..., 256, 328, 336):
+		//                  commit those 4 latches to the shift registers.
+		//                  Also incCoarseX (except cycle 256 which does incY).
 		inFetch := (p.cycle >= 1 && p.cycle <= 256) || (p.cycle >= 321 && p.cycle <= 336)
 		if inFetch {
 			p.shiftBG()
-			switch (p.cycle - 1) & 7 {
+			switch p.cycle % 8 {
+			case 1:
+				p.fetchNT()
+			case 3:
+				p.fetchAT()
+			case 5:
+				p.fetchBGPatternLo()
+			case 7:
+				p.fetchBGPatternHi()
 			case 0:
 				p.loadBGShifters()
-				p.fetchNT()
-			case 2:
-				p.fetchAT()
-			case 4:
-				p.fetchBGPatternLo()
-			case 6:
-				p.fetchBGPatternHi()
-			}
-			// incCoarseX at end of each tile (cycles 8, 16, ... 256, 328, 336)
-			if p.cycle == 256 {
-				p.incY()
-			} else if (p.cycle&7) == 0 && p.cycle != 0 {
-				p.incCoarseX()
+				if p.cycle == 256 {
+					p.incY()
+				} else {
+					p.incCoarseX()
+				}
 			}
 		}
 		// Copy horizontal bits at cycle 257
