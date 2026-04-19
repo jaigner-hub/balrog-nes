@@ -462,11 +462,6 @@ func (p *PPU) predictSprite0Hit(y int) int {
 	sprLo := p.vramRead(patBase + uint16(tileIdx)*16 + uint16(row))
 	sprHi := p.vramRead(patBase + uint16(tileIdx)*16 + uint16(row) + 8)
 
-	// Snapshot BG state so we can advance v while scanning without disturbing
-	// the real registers.
-	origV := p.v
-	defer func() { p.v = origV }()
-
 	for px := 0; px < 8; px++ {
 		sx := x0 + px
 		if sx >= 255 { // sprite 0 hit never fires on pixel 255
@@ -494,11 +489,11 @@ func (p *PPU) predictSprite0Hit(y int) int {
 }
 
 // bgOpaqueAt returns whether the background pattern is opaque at screen X px,
-// assuming the current v register is at the start of the scanline. Advances
-// p.v as it walks pixels, but predictSprite0Hit snapshots/restores v so this
-// is safe to call mid-scanline.
+// assuming v is at the start of the scanline. Self-contained — snapshots
+// and restores v so callers can invoke it multiple times without state leak.
 func (p *PPU) bgOpaqueAt(px int) bool {
-	p.v = (p.v &^ 0)
+	origV := p.v
+	defer func() { p.v = origV }()
 	for x := 0; x <= px; x++ {
 		fineX := (int(p.x) + x) & 7
 		if x > 0 && fineX == 0 {
