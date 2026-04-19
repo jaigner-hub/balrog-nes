@@ -98,8 +98,12 @@ func (n *NES) Snapshot() *SaveState {
 }
 
 func (n *NES) Restore(s *SaveState) error {
-	if s.Version != stateVersion {
-		return fmt.Errorf("state version mismatch: got %d want %d", s.Version, stateVersion)
+	// Older state files decode cleanly into newer structs — gob just zeros
+	// the fields that didn't exist yet. Block only *newer* states from
+	// loading into an older binary.
+	if s.Version > stateVersion {
+		return fmt.Errorf("state was saved by a newer build (v%d) than this one (v%d)",
+			s.Version, stateVersion)
 	}
 	if s.MapperID != n.Bus.Cart.MapperID {
 		return fmt.Errorf("state was saved with mapper %d, current ROM uses mapper %d",
