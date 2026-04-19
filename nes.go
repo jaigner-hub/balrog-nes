@@ -119,10 +119,14 @@ func (n *NES) StepFrame() {
 		// Mid-scanline MMC3 IRQ clock for visible scanlines. Firing before
 		// the CPU's scanline budget runs out gives SMB3 / Kirby / Mega Man 3+
 		// IRQ handlers time to complete the scroll-register writes they need.
-		if visible && rendering && n.scanlineCounter != nil {
+		// Re-check the rendering mask right before clocking — the CPU may have
+		// toggled $2001 during the inner run.
+		if visible && n.scanlineCounter != nil {
 			mid := scanlineStart + (scanlineEnd-scanlineStart)*87/114
 			n.runCPUUntil(mid)
-			n.scanlineCounter.ClockScanline()
+			if n.PPU.mask&(maskShowBg|maskShowSpr) != 0 {
+				n.scanlineCounter.ClockScanline()
+			}
 		}
 
 		n.runCPUUntil(scanlineEnd)
@@ -131,7 +135,7 @@ func (n *NES) StepFrame() {
 		// Pre-render still gets a scanline clock (it's one of MMC3's 241
 		// clocks per frame); doing it at end-of-iter is close enough to the
 		// real PPU-cycle-324 spot.
-		if preRender && rendering && n.scanlineCounter != nil {
+		if preRender && n.scanlineCounter != nil && n.PPU.mask&(maskShowBg|maskShowSpr) != 0 {
 			n.scanlineCounter.ClockScanline()
 		}
 		if done {
