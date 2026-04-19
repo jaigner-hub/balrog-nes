@@ -291,8 +291,13 @@ func (d *dmcCh) writeReg(reg int, v byte) {
 }
 
 // fetchByte reads the next sample byte from cartridge memory and stalls the
-// CPU 4 cycles (typical DMC DMA cost). Real hardware can stall 1-4 cycles
-// depending on what the CPU is doing; 4 is a safe approximation.
+// CPU. Real hardware stalls 1-4 cycles depending on what the CPU is currently
+// doing (1 if DMA lands on a CPU read cycle it can steal, up to 4 in worst
+// case). A constant 4 adds up to ~3 CPU cycles/fetch of extra stall vs real
+// hardware, which in DMC-heavy games like SMB3 can throw off cycle-sensitive
+// scroll/physics timing. Use 2 (roughly the hardware average) for a better
+// balance — cycle-accurate DMC stall would require knowing the CPU's
+// instruction phase, which we don't model.
 func (d *dmcCh) fetchByte(a *APU) {
 	if a.bus == nil || d.bytesLeft == 0 {
 		return
@@ -314,7 +319,7 @@ func (d *dmcCh) fetchByte(a *APU) {
 		}
 	}
 	if a.cpu != nil {
-		a.cpu.stall += 4
+		a.cpu.stall += 2
 	}
 }
 
