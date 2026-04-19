@@ -69,73 +69,68 @@ func (n *NES) runCPUUntil(target uint64) {
 	}
 }
 
-// clockMapperScanline fires the mapper's scanline counter at the end of
-// each visible scanline (and pre-render) when rendering is enabled. That's
-// how MMC3 approximates the PPU-A12 rising-edge count real hardware does.
-func (n *NES) clockMapperScanline() {
-	if n.scanlineCounter == nil {
-		return
-	}
-	if n.PPU.mask&(maskShowBg|maskShowSpr) == 0 {
-		return
-	}
-	// Previous StepScanline has already advanced PPU.scanline, so the line
-	// that just rendered is scanline-1 (mod 262). Fire for visible and
-	// pre-render only.
-	prev := n.PPU.scanline - 1
-	if prev < 0 {
-		prev = 261
-	}
-	if prev < 240 || prev == 261 {
-		n.scanlineCounter.ClockScanline()
-	}
-}
-
 func (n *NES) StepFrame() {
 	frameStart := n.CPU.cycles
 	// Each iteration covers one 341-PPU-cycle slot (~113.67 CPU cycles).
 	// PPU.scanline is the authoritative "what's about to render next"; iter 0
-	// is pre-render (PPU.scanline=261), iter 1 renders scanline 0, etc. Use
-	// PPU.scanline (not the iteration index) for prediction so we consult v
-	// in the state it'll actually have when that scanline renders.
+	// is pre-render (PPU.scanline=261), iter 1 renders scanline 0, etc.
+	//
+	// Real MMC3 fires its scanline IRQ on the first PPU A12 rising edge around
+	// PPU cycle 260 of visible scanlines (when sprite fetching begins, with
+	// BG at $0000 / sprites at $1000). That lands at roughly CPU cycle 87 of
+	// the scanline's ~113.67 — about 77% through. Clocking mid-scanline gives
+	// the IRQ handler enough cycles left in the same scanline to write new
+	// scroll registers, matching how MMC3 games expect things to line up.
 	for i := 0; i < 262; i++ {
-		scanlineEnd := frameStart + uint64(cpuCyclesPerFrame*(i+1))/262
 		scanlineStart := frameStart + uint64(cpuCyclesPerFrame*i)/262
+		scanlineEnd := frameStart + uint64(cpuCyclesPerFrame*(i+1))/262
 		target := n.PPU.scanline
+		rendering := n.PPU.mask&(maskShowBg|maskShowSpr) != 0
+		visible := target < 240
+		preRender := target == 261
 
-		if target < 240 && n.PPU.status&statSpr0 == 0 {
-			hitX := n.PPU.predictSprite0Hit(target)
-			// Only trust mid-scanline split-rendering for the classic top
-			// status-bar scenario (sprite 0 within the top 48 scanlines, like
-			// SMB1 or Zelda). For games that use sprite 0 elsewhere — often as
-			// a regular gameplay sprite (e.g., SMB3 where Mario's own sprite
-			// can end up as sprite 0) — the split would corrupt scrolling
-			// without fixing anything meaningful.
-			if hitX >= 0 && target < 48 {
+		// Sprite-0 hit with a top-of-screen split. Gated to scanlines < 48 so
+		// gameplay sprites (e.g., Mario-as-sprite-0 in SMB3) don't trigger a
+		// disruptive mid-scanline split every frame.
+		if visible && target < 48 && n.PPU.status&statSpr0 == 0 {
+			if hitX := n.PPU.predictSprite0Hit(target); hitX >= 0 {
 				hitTarget := scanlineStart + uint64(hitX+1)/3
 				if hitTarget > scanlineEnd {
 					hitTarget = scanlineEnd
 				}
-				// 1. CPU runs up to the hit cycle (polling, flag not yet set).
 				n.runCPUUntil(hitTarget)
-				// 2. Render the pre-hit pixels with the current v.
 				n.PPU.beginScanlineRender(target)
 				n.PPU.renderBGRange(0, hitX+1)
-				// 3. Fire sprite-0 hit.
 				n.PPU.status |= statSpr0
-				// 4. Let CPU run the rest of the scanline's budget.
 				n.runCPUUntil(scanlineEnd)
-				// 5. Render the post-hit pixels with whatever v is now.
 				n.PPU.renderBGRange(hitX+1, 256)
 				n.PPU.endScanlineRender(target)
 				n.PPU.scanline++
-				n.clockMapperScanline()
+				if rendering && n.scanlineCounter != nil {
+					n.scanlineCounter.ClockScanline()
+				}
 				continue
 			}
 		}
+
+		// Mid-scanline MMC3 IRQ clock for visible scanlines. Firing before
+		// the CPU's scanline budget runs out gives SMB3 / Kirby / Mega Man 3+
+		// IRQ handlers time to complete the scroll-register writes they need.
+		if visible && rendering && n.scanlineCounter != nil {
+			mid := scanlineStart + (scanlineEnd-scanlineStart)*87/114
+			n.runCPUUntil(mid)
+			n.scanlineCounter.ClockScanline()
+		}
+
 		n.runCPUUntil(scanlineEnd)
 		done := n.PPU.StepScanline()
-		n.clockMapperScanline()
+
+		// Pre-render still gets a scanline clock (it's one of MMC3's 241
+		// clocks per frame); doing it at end-of-iter is close enough to the
+		// real PPU-cycle-324 spot.
+		if preRender && rendering && n.scanlineCounter != nil {
+			n.scanlineCounter.ClockScanline()
+		}
 		if done {
 			return
 		}
