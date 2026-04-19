@@ -91,8 +91,11 @@ func (n *NES) StepFrame() {
 
 		// Sprite-0 hit with a top-of-screen split. Gated to scanlines < 48 so
 		// gameplay sprites (e.g., Mario-as-sprite-0 in SMB3) don't trigger a
-		// disruptive mid-scanline split every frame.
-		if visible && target < 48 && n.PPU.status&statSpr0 == 0 {
+		// disruptive mid-scanline split every frame. Also skip when an MMC3
+		// scanline counter is wired in — those games (SMB3, Kirby) rely on
+		// the IRQ firing on a deterministic scanline, and a split iter's
+		// different CPU/clock ordering shifts that timing.
+		if visible && target < 48 && n.PPU.status&statSpr0 == 0 && n.scanlineCounter == nil {
 			if hitX := n.PPU.predictSprite0Hit(target); hitX >= 0 {
 				hitTarget := scanlineStart + uint64(hitX+1)/3
 				if hitTarget > scanlineEnd {
