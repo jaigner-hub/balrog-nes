@@ -1,0 +1,28 @@
+# Build output
+balrog.exe
+balrog
+*.exe
+*.test
+*.out
+
+# ROM files (copyrighted — do not commit)
+*.nes
+*.fds
+*.unf
+*.unif
+
+# Snapshots / debug captures
+*.png
+
+# Save states (future)
+*.state
+*.sav
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Claude Code per-machine settings
+.claude/settings.local.json
