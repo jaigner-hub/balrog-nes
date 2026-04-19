@@ -611,18 +611,22 @@ func (p *PPU) Step() {
 	}
 
 	if renderLine && renderingOn {
-		// BG fetches and shifts during cycles 1..256 and 321..336. The fetch
-		// pipeline per 8-cycle slot:
-		//   cycle % 8 == 1: NT byte
-		//   cycle % 8 == 3: AT byte
-		//   cycle % 8 == 5: pattern lo
-		//   cycle % 8 == 7: pattern hi
-		//   cycle % 8 == 0 (i.e. end-of-slot, cycles 8, 16, ..., 256, 328, 336):
-		//                  commit those 4 latches to the shift registers.
-		//                  Also incCoarseX (except cycle 256 which does incY).
 		inFetch := (p.cycle >= 1 && p.cycle <= 256) || (p.cycle >= 321 && p.cycle <= 336)
+		// Output FIRST (reads current register state for this pixel), THEN
+		// shift — matches real NES order. If we shifted before output, pixel
+		// 0 would come from a shifted register and always be wrong.
+		if visible && p.cycle >= 1 && p.cycle <= 256 {
+			p.outputPixel()
+		}
 		if inFetch {
 			p.shiftBG()
+			// Fetch pipeline per 8-cycle slot:
+			//   cycle % 8 == 1: NT byte
+			//   cycle % 8 == 3: AT byte
+			//   cycle % 8 == 5: pattern lo
+			//   cycle % 8 == 7: pattern hi
+			//   cycle % 8 == 0: load fetched latches into shift registers
+			//                    and incCoarseX (or incY at cycle 256).
 			switch p.cycle % 8 {
 			case 1:
 				p.fetchNT()
@@ -677,12 +681,8 @@ func (p *PPU) Step() {
 		}
 	}
 
-	// Pixel output on visible scanlines 0..239, cycles 1..256
-	if visible && renderingOn && p.cycle >= 1 && p.cycle <= 256 {
-		p.outputPixel()
-	} else if visible && !renderingOn && p.cycle >= 1 && p.cycle <= 256 {
-		// Rendering off: show universal background color (or palette when
-		// v addresses palette range — not modeled here).
+	// Rendering-disabled path: fill with universal BG color.
+	if visible && !renderingOn && p.cycle >= 1 && p.cycle <= 256 {
 		p.Frame[p.scanline*256+p.cycle-1] = nesPalette[p.palette[0]&0x3F]
 	}
 
