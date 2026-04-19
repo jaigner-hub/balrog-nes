@@ -328,7 +328,10 @@ func (p *PPU) endScanlineRender(y int) {
 		type sp struct{ idx, x, y, tile, attr int }
 		var sprs []sp
 		for i := 0; i < 64; i++ {
-			sy := int(p.oam[i*4])
+			// OAM byte 0 stores "sprite top Y minus 1" — games write the
+			// desired Y coordinate minus 1 here, and hardware draws the
+			// sprite starting on the NEXT scanline.
+			sy := int(p.oam[i*4]) + 1
 			if y < sy || y >= sy+spriteH {
 				continue
 			}
@@ -427,7 +430,7 @@ func (p *PPU) predictSprite0Hit(y int) int {
 	if p.mask&maskShowBg == 0 || p.mask&maskShowSpr == 0 {
 		return -1
 	}
-	sy := int(p.oam[0])
+	sy := int(p.oam[0]) + 1 // OAM Y is stored as actual Y minus 1
 	height := 8
 	if p.ctrl&ctrlSprSize != 0 {
 		height = 16
