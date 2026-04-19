@@ -12,14 +12,13 @@ Working:
 - Scanline-accurate PPU with background, sprites (8×8 and 8×16), sprite-0 hit, palette, OAM DMA
 - iNES loader
 - Mappers: **NROM (0)**, **MMC1 (1)**
-- APU: pulse × 2 (with envelope and sweep), triangle, noise; NES hardware filter chain (90 Hz HP → 440 Hz HP → 14 kHz LP)
+- APU: pulse × 2 (with envelope and sweep), triangle, noise, DMC (sample playback); NES hardware filter chain (90 Hz HP → 440 Hz HP → 14 kHz LP)
 - Keyboard input, standard-gamepad input (8BitDo, Xbox, DualShock — anything Ebiten recognizes)
 - File-open GUI: native dialog, drag-and-drop, recent reset
 - Save states (per-ROM `.state` file)
 
 Not yet implemented:
 
-- DMC channel (sample-based percussion / bass; SMB's bass-drum sounds use this)
 - Other mappers (UxROM/2, CNROM/3, MMC3/4, etc.)
 - Battery-backed save RAM persistence (Zelda's in-game save isn't written to disk yet)
 - Per-cycle PPU (causes occasional jitter on SMB's status bar split)

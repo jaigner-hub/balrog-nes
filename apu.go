@@ -43,6 +43,11 @@ var noisePeriods = [16]uint16{
 	4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068,
 }
 
+// NTSC DMC rate table — CPU cycles between output level updates.
+var dmcPeriods = [16]uint16{
+	428, 380, 340, 320, 286, 254, 226, 214, 190, 160, 142, 128, 106, 84, 72, 54,
+}
+
 type envelope struct {
 	start       bool
 	loop        bool
@@ -237,6 +242,135 @@ func (t *triangleCh) output() byte {
 	return triangleSeq[t.seqPos]
 }
 
+// Delta Modulation Channel: plays back 1-bit-delta-encoded PCM samples
+// fetched from cartridge memory at $C000-$FFFF. Each output bit nudges the
+// 7-bit DAC level up (+2) or down (-2). Used for percussion, voice clips,
+// and effects (e.g. Zelda's sword-beam "shing").
+type dmcCh struct {
+	enabled bool
+	irqEn   bool
+	loop    bool
+
+	// Configuration registers
+	rateIdx     byte
+	output      byte // 7-bit DAC value (0..127)
+	sampleAddr  uint16
+	sampleLen   uint16
+
+	// Playback state
+	timer       uint16
+	currentAddr uint16
+	bytesLeft   uint16
+
+	// Bit-shifter
+	shifter        byte
+	bitsRemaining  byte
+	silence        bool
+	sampleBuffer   byte
+	bufferLoaded   bool
+
+	irqPending bool
+}
+
+func (d *dmcCh) writeReg(reg int, v byte) {
+	switch reg {
+	case 0: // $4010
+		d.irqEn = v&0x80 != 0
+		d.loop = v&0x40 != 0
+		d.rateIdx = v & 0x0F
+		if !d.irqEn {
+			d.irqPending = false
+		}
+	case 1: // $4011
+		d.output = v & 0x7F
+	case 2: // $4012
+		d.sampleAddr = 0xC000 | (uint16(v) << 6)
+	case 3: // $4013
+		d.sampleLen = (uint16(v) << 4) | 1
+	}
+}
+
+// fetchByte reads the next sample byte from cartridge memory and stalls the
+// CPU 4 cycles (typical DMC DMA cost). Real hardware can stall 1-4 cycles
+// depending on what the CPU is doing; 4 is a safe approximation.
+func (d *dmcCh) fetchByte(a *APU) {
+	if a.bus == nil || d.bytesLeft == 0 {
+		return
+	}
+	d.sampleBuffer = a.bus.Read(d.currentAddr)
+	d.bufferLoaded = true
+	if d.currentAddr == 0xFFFF {
+		d.currentAddr = 0x8000
+	} else {
+		d.currentAddr++
+	}
+	d.bytesLeft--
+	if d.bytesLeft == 0 {
+		if d.loop {
+			d.currentAddr = d.sampleAddr
+			d.bytesLeft = d.sampleLen
+		} else if d.irqEn {
+			d.irqPending = true
+		}
+	}
+	if a.cpu != nil {
+		a.cpu.stall += 4
+	}
+}
+
+func (d *dmcCh) startSample() {
+	if d.bytesLeft == 0 {
+		d.currentAddr = d.sampleAddr
+		d.bytesLeft = d.sampleLen
+	}
+}
+
+// tickTimer is called every CPU cycle. When the timer hits 0, process one
+// output bit. If the shifter is empty and a buffer byte is available, refill;
+// if no buffer byte, mark this output cycle as "silence" (output stays put).
+func (d *dmcCh) tickTimer(a *APU) {
+	if d.timer == 0 {
+		d.timer = dmcPeriods[d.rateIdx]
+		// Process one bit
+		if !d.silence {
+			if d.shifter&1 != 0 {
+				if d.output <= 125 {
+					d.output += 2
+				}
+			} else {
+				if d.output >= 2 {
+					d.output -= 2
+				}
+			}
+		}
+		d.shifter >>= 1
+		if d.bitsRemaining > 0 {
+			d.bitsRemaining--
+		}
+		if d.bitsRemaining == 0 {
+			d.bitsRemaining = 8
+			if !d.bufferLoaded {
+				d.silence = true
+			} else {
+				d.silence = false
+				d.shifter = d.sampleBuffer
+				d.bufferLoaded = false
+				if d.bytesLeft > 0 {
+					d.fetchByte(a)
+				}
+			}
+		}
+	} else {
+		d.timer--
+	}
+	// Keep the buffer topped up so we don't run out mid-shift.
+	if !d.bufferLoaded && d.bytesLeft > 0 {
+		d.fetchByte(a)
+	}
+}
+
+func (d *dmcCh) outputLevel() byte { return d.output }
+
 type noiseCh struct {
 	enabled    bool
 	timer      uint16
@@ -298,11 +432,17 @@ type APU struct {
 	Pulse1, Pulse2 pulseCh
 	Triangle       triangleCh
 	Noise          noiseCh
+	DMC            dmcCh
 
 	cycle      uint64
 	frameStep  int
 	frameMode  byte // 0=4-step, 1=5-step
 	inhibitIRQ bool
+
+	// Set by NewNES so the DMC channel can fetch sample bytes from PRG-ROM
+	// (via the bus) and stall the CPU during a DMA fetch.
+	bus *NESBus
+	cpu *CPU
 
 	// Sample generation
 	sampleRate      float64
@@ -356,11 +496,14 @@ func (a *APU) CPUWrite(addr uint16, v byte) {
 		a.Triangle.writeReg(int(addr-0x4008), v)
 	case addr >= 0x400C && addr <= 0x400F:
 		a.Noise.writeReg(int(addr-0x400C), v)
+	case addr >= 0x4010 && addr <= 0x4013:
+		a.DMC.writeReg(int(addr-0x4010), v)
 	case addr == 0x4015:
 		a.Pulse1.enabled = v&0x01 != 0
 		a.Pulse2.enabled = v&0x02 != 0
 		a.Triangle.enabled = v&0x04 != 0
 		a.Noise.enabled = v&0x08 != 0
+		a.DMC.enabled = v&0x10 != 0
 		if !a.Pulse1.enabled {
 			a.Pulse1.length = 0
 		}
@@ -373,6 +516,12 @@ func (a *APU) CPUWrite(addr uint16, v byte) {
 		if !a.Noise.enabled {
 			a.Noise.length = 0
 		}
+		if !a.DMC.enabled {
+			a.DMC.bytesLeft = 0
+		} else {
+			a.DMC.startSample()
+		}
+		a.DMC.irqPending = false
 	case addr == 0x4017:
 		a.frameMode = (v >> 7) & 1
 		a.inhibitIRQ = v&0x40 != 0
@@ -399,6 +548,14 @@ func (a *APU) CPURead(addr uint16) byte {
 		if a.Noise.length > 0 {
 			r |= 0x08
 		}
+		if a.DMC.bytesLeft > 0 {
+			r |= 0x10
+		}
+		if a.DMC.irqPending {
+			r |= 0x80
+		}
+		// Reading $4015 acknowledges the DMC IRQ.
+		a.DMC.irqPending = false
 		return r
 	}
 	return 0
@@ -454,8 +611,9 @@ func (a *APU) clockFrame() {
 
 // Step is called once per CPU cycle.
 func (a *APU) Step() {
-	// Triangle clocked every CPU cycle.
+	// Triangle and DMC clocked every CPU cycle.
 	a.Triangle.tickTimer()
+	a.DMC.tickTimer(a)
 	// Pulse/Noise clocked every other CPU cycle (APU rate).
 	if a.cycle&1 == 0 {
 		a.Pulse1.tickTimer()
@@ -488,7 +646,8 @@ func (a *APU) emitSample() {
 	if p1+p2 > 0 {
 		pulseOut = 95.88 / (8128.0/float32(p1+p2) + 100.0)
 	}
-	denom := float32(tr)/8227.0 + float32(no)/12241.0
+	dmc := a.DMC.outputLevel()
+	denom := float32(tr)/8227.0 + float32(no)/12241.0 + float32(dmc)/22638.0
 	if denom > 0 {
 		tndOut = 159.79 / (1.0/denom + 100.0)
 	}

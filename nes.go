@@ -13,6 +13,8 @@ func NewNES(cart *Cart, sampleRate float64) *NES {
 	cpu := &CPU{}
 	bus := &NESBus{Cart: cart, PPU: ppu, APU: apu, CPU: cpu}
 	cpu.Bus = bus
+	apu.bus = bus // DMC reads sample bytes via the bus
+	apu.cpu = cpu // DMC adds CPU stall during DMA fetches
 	cpu.Reset()
 	return &NES{Bus: bus, CPU: cpu, PPU: ppu, APU: apu}
 }
@@ -40,6 +42,9 @@ func (n *NES) StepFrame() {
 			if n.PPU.NMIPending {
 				n.PPU.NMIPending = false
 				n.CPU.NMI()
+			}
+			if n.APU.DMC.irqPending {
+				n.CPU.IRQ()
 			}
 		}
 		done = n.PPU.StepScanline()

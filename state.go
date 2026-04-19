@@ -8,7 +8,7 @@ import (
 )
 
 // Save state format. Bumped if the layout changes incompatibly.
-const stateVersion = 1
+const stateVersion = 2 // bumped when DMC was added
 
 type SaveState struct {
 	Version int
@@ -197,10 +197,22 @@ type apuBlob struct {
 	Pulse1, Pulse2 pulseBlob
 	Triangle       triangleBlob
 	Noise          noiseBlob
+	DMC            dmcBlob
 	Cycle          uint64
 	FrameStep      int
 	FrameMode      byte
 	InhibitIRQ     bool
+}
+
+type dmcBlob struct {
+	Enabled, IrqEn, Loop                 bool
+	RateIdx, Output                      byte
+	SampleAddr, SampleLen                uint16
+	Timer                                uint16
+	CurrentAddr                          uint16
+	BytesLeft                            uint16
+	Shifter, BitsRemaining, SampleBuffer byte
+	Silence, BufferLoaded, IrqPending    bool
 }
 
 type pulseBlob struct {
@@ -241,6 +253,7 @@ func (a *APU) snapshot() []byte {
 		Pulse2:     pulseToBlob(&a.Pulse2),
 		Triangle:   triangleToBlob(&a.Triangle),
 		Noise:      noiseToBlob(&a.Noise),
+		DMC:        dmcToBlob(&a.DMC),
 		Cycle:      a.cycle,
 		FrameStep:  a.frameStep,
 		FrameMode:  a.frameMode,
@@ -260,9 +273,29 @@ func (a *APU) restore(data []byte) error {
 	pulseFromBlob(&a.Pulse2, b.Pulse2)
 	triangleFromBlob(&a.Triangle, b.Triangle)
 	noiseFromBlob(&a.Noise, b.Noise)
+	dmcFromBlob(&a.DMC, b.DMC)
 	a.cycle, a.frameStep, a.frameMode, a.inhibitIRQ =
 		b.Cycle, b.FrameStep, b.FrameMode, b.InhibitIRQ
 	return nil
+}
+
+func dmcToBlob(d *dmcCh) dmcBlob {
+	return dmcBlob{
+		Enabled: d.enabled, IrqEn: d.irqEn, Loop: d.loop,
+		RateIdx: d.rateIdx, Output: d.output,
+		SampleAddr: d.sampleAddr, SampleLen: d.sampleLen,
+		Timer: d.timer, CurrentAddr: d.currentAddr, BytesLeft: d.bytesLeft,
+		Shifter: d.shifter, BitsRemaining: d.bitsRemaining, SampleBuffer: d.sampleBuffer,
+		Silence: d.silence, BufferLoaded: d.bufferLoaded, IrqPending: d.irqPending,
+	}
+}
+func dmcFromBlob(d *dmcCh, b dmcBlob) {
+	d.enabled, d.irqEn, d.loop = b.Enabled, b.IrqEn, b.Loop
+	d.rateIdx, d.output = b.RateIdx, b.Output
+	d.sampleAddr, d.sampleLen = b.SampleAddr, b.SampleLen
+	d.timer, d.currentAddr, d.bytesLeft = b.Timer, b.CurrentAddr, b.BytesLeft
+	d.shifter, d.bitsRemaining, d.sampleBuffer = b.Shifter, b.BitsRemaining, b.SampleBuffer
+	d.silence, d.bufferLoaded, d.irqPending = b.Silence, b.BufferLoaded, b.IrqPending
 }
 
 func pulseToBlob(p *pulseCh) pulseBlob {
