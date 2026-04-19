@@ -375,8 +375,16 @@ func (p *PPU) shiftBG() {
 // whether sprite 0 is among them. We do it at cycle 257 in one shot —
 // real hardware spreads this over cycles 65..256 of the current scanline,
 // but the end result (which sprites end up in secondary OAM) is the same.
+//
+// On the pre-render scanline (261), "next line" is scanline 0 — that's what
+// hardware prepares for during pre-render's 257..320 window.
 func (p *PPU) evaluateSpritesForNextLine() {
-	nextLine := p.scanline + 1
+	var nextLine int
+	if p.scanline == 261 {
+		nextLine = 0
+	} else {
+		nextLine = p.scanline + 1
+	}
 	if nextLine >= 240 {
 		p.numSprites = 0
 		p.nextHasS0 = false
@@ -443,7 +451,13 @@ func (p *PPU) fetchSpriteTile(slot int) {
 	if p.ctrl&ctrlSprSize != 0 {
 		spriteH = 16
 	}
-	row := p.scanline + 1 - sy
+	// Row within the sprite for the NEXT scanline — same "next line" logic
+	// as evaluateSpritesForNextLine uses.
+	nextLine := p.scanline + 1
+	if p.scanline == 261 {
+		nextLine = 0
+	}
+	row := nextLine - sy
 	flipV := attr&0x80 != 0
 	if flipV {
 		row = spriteH - 1 - row
