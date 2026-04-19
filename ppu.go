@@ -77,9 +77,6 @@ type PPU struct {
 	sprX         [8]byte
 	sprIsS0      [8]bool
 
-	// --- MMC3 A12 tracking ---
-	a12State       bool
-	a12LowCycles   int
 }
 
 const (
@@ -113,7 +110,7 @@ var nesPalette = [64]uint32{
 	0xE9E681FF, 0xCEF481FF, 0xB6FB9AFF, 0xA9FAC3FF, 0xA9F0F4FF, 0xB8B8B8FF, 0x000000FF, 0x000000FF,
 }
 
-func NewPPU(c *Cart) *PPU { return &PPU{cart: c, scanline: 261, a12LowCycles: 1000} }
+func NewPPU(c *Cart) *PPU { return &PPU{cart: c, scanline: 261} }
 
 // Nametable mirroring
 func (p *PPU) mirrorNT(addr uint16) (bank, idx int) {
@@ -136,12 +133,7 @@ func (p *PPU) mirrorNT(addr uint16) (bank, idx int) {
 	return int(table & 1), offs
 }
 
-// vramRead routes a PPU address to the right backing memory and also
-// tracks the A12 line. A low→high A12 transition, when A12 has been low
-// for at least ~12 PPU cycles, clocks the mapper's scanline counter
-// (MMC3 hook). This is how MMC3 decides when to fire an IRQ in hardware.
 func (p *PPU) vramRead(addr uint16) byte {
-	p.updateA12(addr)
 	addr &= 0x3FFF
 	switch {
 	case addr < 0x2000:
@@ -159,7 +151,6 @@ func (p *PPU) vramRead(addr uint16) byte {
 }
 
 func (p *PPU) vramWrite(addr uint16, v byte) {
-	p.updateA12(addr)
 	addr &= 0x3FFF
 	switch {
 	case addr < 0x2000:
@@ -174,20 +165,6 @@ func (p *PPU) vramWrite(addr uint16, v byte) {
 		}
 		p.palette[i] = v & 0x3F
 	}
-}
-
-func (p *PPU) updateA12(addr uint16) {
-	newA12 := addr&0x1000 != 0
-	if !p.a12State && newA12 && p.a12LowCycles >= 12 {
-		if sc, ok := p.cart.mapper.(scanlineCounter); ok {
-			sc.ClockScanline()
-		}
-	}
-	if newA12 {
-		p.a12LowCycles = 0
-	}
-	// a12LowCycles is otherwise incremented by Step() on each PPU cycle.
-	p.a12State = newA12
 }
 
 // CPU <-> PPU register interface
@@ -586,13 +563,6 @@ func (p *PPU) outputPixel() {
 
 // Step advances the PPU one cycle.
 func (p *PPU) Step() {
-	// Maintain A12 "low cycle" counter (used by the MMC3 filter)
-	if p.a12State {
-		p.a12LowCycles = 0
-	} else if p.a12LowCycles < 1<<30 {
-		p.a12LowCycles++
-	}
-
 	visible := p.scanline < 240
 	preRender := p.scanline == 261
 	renderLine := visible || preRender
@@ -662,15 +632,22 @@ func (p *PPU) Step() {
 		if preRender && p.cycle >= 280 && p.cycle <= 304 {
 			p.copyY()
 		}
-		// Sprite tile fetches during 257..320 — this is where MMC3 IRQ
-		// clocking happens in the real chip (A12 rising edges).
+		// Sprite tile fetches during 257..320.
 		if p.cycle >= 257 && p.cycle <= 320 {
 			slot := (p.cycle - 257) / 8
 			cycleInSlot := (p.cycle - 257) & 7
 			if cycleInSlot == 5 {
-				// Handle both pattern fetches together — the A12 pattern
-				// from a pair of sprite fetches is what MMC3 counts on.
 				p.fetchSpriteTile(slot)
+			}
+		}
+		// MMC3 scanline counter clock: fire once per visible / pre-render
+		// scanline at a fixed PPU cycle (260, matching the first sprite
+		// fetch on standard MMC3 configurations). Cycle-position-stable,
+		// so IRQ handler scroll writes land on the same pixel every frame
+		// regardless of sprite-pattern variance.
+		if p.cycle == 260 && (visible || preRender) {
+			if sc, ok := p.cart.mapper.(scanlineCounter); ok {
+				sc.ClockScanline()
 			}
 		}
 		// Latch "has sprite 0" for the scanline we're about to start
