@@ -38,6 +38,10 @@ func LoadCart(path string) (*Cart, error) {
 	if err != nil {
 		return nil, err
 	}
+	return LoadCartBytes(data)
+}
+
+func LoadCartBytes(data []byte) (*Cart, error) {
 	if len(data) < 16 || string(data[0:4]) != "NES\x1A" {
 		return nil, errors.New("not an iNES file")
 	}
