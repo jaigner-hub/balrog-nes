@@ -54,14 +54,16 @@ type PPU struct {
 	bgATByte      byte
 	bgPatternLo   byte
 	bgPatternHi   byte
-	// 16-bit shift registers: each cycle shifts one bit out; every 8 cycles
-	// a freshly fetched tile pair is loaded into the high byte.
+	// 16-bit shift registers. Each cycle shifts left one bit. Every 8 cycles
+	// a freshly fetched tile is loaded into the LOW byte (and the current tile
+	// naturally moves to the HIGH byte via shifts). For attributes, all 8
+	// pixels of a tile share the same palette bits, so on load we fill the
+	// low byte with 0x00 or 0xFF depending on the attribute bit — otherwise
+	// the left and right halves of a tile end up on different palettes.
 	bgShiftPatternLo uint16
 	bgShiftPatternHi uint16
 	bgShiftAttribLo  uint16
 	bgShiftAttribHi  uint16
-	bgAttribLatchLo  byte
-	bgAttribLatchHi  byte
 
 	// --- Sprite rendering state ---
 	secondaryOAM [8 * 4]byte
@@ -343,8 +345,17 @@ func (p *PPU) fetchBGPatternHi() {
 func (p *PPU) loadBGShifters() {
 	p.bgShiftPatternLo = (p.bgShiftPatternLo & 0xFF00) | uint16(p.bgPatternLo)
 	p.bgShiftPatternHi = (p.bgShiftPatternHi & 0xFF00) | uint16(p.bgPatternHi)
-	p.bgAttribLatchLo = p.bgATByte & 1
-	p.bgAttribLatchHi = (p.bgATByte >> 1) & 1
+	// Fill the low byte of each attribute shift register with the tile's
+	// palette bit repeated 8 times — all 8 pixels share it.
+	var loFill, hiFill uint16
+	if p.bgATByte&1 != 0 {
+		loFill = 0x00FF
+	}
+	if p.bgATByte&2 != 0 {
+		hiFill = 0x00FF
+	}
+	p.bgShiftAttribLo = (p.bgShiftAttribLo & 0xFF00) | loFill
+	p.bgShiftAttribHi = (p.bgShiftAttribHi & 0xFF00) | hiFill
 }
 
 func (p *PPU) shiftBG() {
@@ -353,8 +364,8 @@ func (p *PPU) shiftBG() {
 	}
 	p.bgShiftPatternLo <<= 1
 	p.bgShiftPatternHi <<= 1
-	p.bgShiftAttribLo = (p.bgShiftAttribLo << 1) | uint16(p.bgAttribLatchLo)
-	p.bgShiftAttribHi = (p.bgShiftAttribHi << 1) | uint16(p.bgAttribLatchHi)
+	p.bgShiftAttribLo <<= 1
+	p.bgShiftAttribHi <<= 1
 }
 
 // --- Sprite evaluation & fetch ---
