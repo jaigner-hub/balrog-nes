@@ -397,6 +397,115 @@ func (p *PPU) renderScanline(y int) {
 	}
 }
 
+// predictSprite0Hit walks sprite 0 against the background for scanline y
+// and returns the first pixel where they both contain an opaque pixel
+// (which is the pixel that would set $2002 bit 6 on real hardware). Returns
+// -1 if no hit on this scanline.
+//
+// This lets StepFrame pre-set the flag at the correct mid-scanline cycle
+// instead of only at end-of-scanline, which is what caused the status-bar
+// jitter in Super Mario Bros: the coin animation shifts the hit scanline,
+// and without mid-scanline timing the split wanders by a whole scanline.
+func (p *PPU) predictSprite0Hit(y int) int {
+	if p.mask&maskShowBg == 0 || p.mask&maskShowSpr == 0 {
+		return -1
+	}
+	sy := int(p.oam[0])
+	height := 8
+	if p.ctrl&ctrlSprSize != 0 {
+		height = 16
+	}
+	if y < sy || y >= sy+height {
+		return -1
+	}
+	row := y - sy
+	tile := p.oam[1]
+	attr := p.oam[2]
+	x0 := int(p.oam[3])
+	flipH := attr&0x40 != 0
+	flipV := attr&0x80 != 0
+	if flipV {
+		row = height - 1 - row
+	}
+	var patBase uint16
+	var tileIdx int
+	if height == 16 {
+		patBase = uint16(tile&1) * 0x1000
+		tileIdx = int(tile & 0xFE)
+		if row >= 8 {
+			tileIdx++
+			row -= 8
+		}
+	} else {
+		if p.ctrl&ctrlSprPtable != 0 {
+			patBase = 0x1000
+		}
+		tileIdx = int(tile)
+	}
+	sprLo := p.vramRead(patBase + uint16(tileIdx)*16 + uint16(row))
+	sprHi := p.vramRead(patBase + uint16(tileIdx)*16 + uint16(row) + 8)
+
+	// Snapshot BG state so we can advance v while scanning without disturbing
+	// the real registers.
+	origV := p.v
+	defer func() { p.v = origV }()
+
+	for px := 0; px < 8; px++ {
+		sx := x0 + px
+		if sx >= 255 { // sprite 0 hit never fires on pixel 255
+			return -1
+		}
+		if sx < 0 {
+			continue
+		}
+		if sx < 8 && (p.mask&maskLeftSpr == 0 || p.mask&maskLeftBg == 0) {
+			continue
+		}
+		bit := byte(7 - px)
+		if flipH {
+			bit = byte(px)
+		}
+		sprC := ((sprLo >> bit) & 1) | (((sprHi >> bit) & 1) << 1)
+		if sprC == 0 {
+			continue
+		}
+		if p.bgOpaqueAt(sx) {
+			return sx
+		}
+	}
+	return -1
+}
+
+// bgOpaqueAt returns whether the background pattern is opaque at screen X px,
+// assuming the current v register is at the start of the scanline. Advances
+// p.v as it walks pixels, but predictSprite0Hit snapshots/restores v so this
+// is safe to call mid-scanline.
+func (p *PPU) bgOpaqueAt(px int) bool {
+	p.v = (p.v &^ 0)
+	for x := 0; x <= px; x++ {
+		fineX := (int(p.x) + x) & 7
+		if x > 0 && fineX == 0 {
+			p.incCoarseX()
+		}
+		if x != px {
+			continue
+		}
+		ntAddr := 0x2000 | (p.v & 0x0FFF)
+		tile := p.vramRead(ntAddr)
+		fineY := (p.v >> 12) & 7
+		ptBase := uint16(0)
+		if p.ctrl&ctrlBgPtable != 0 {
+			ptBase = 0x1000
+		}
+		lo := p.vramRead(ptBase + uint16(tile)*16 + fineY)
+		hi := p.vramRead(ptBase + uint16(tile)*16 + fineY + 8)
+		bit := byte(7 - fineX)
+		c := ((lo >> bit) & 1) | (((hi >> bit) & 1) << 1)
+		return c != 0
+	}
+	return false
+}
+
 // Step the PPU one scanline. Returns true if a frame was completed.
 func (p *PPU) StepScanline() bool {
 	// Pre-render
