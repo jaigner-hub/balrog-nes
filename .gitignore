@@ -11,6 +11,9 @@ balrog
 *.fds
 *.unf
 *.unif
+*.zip
+*.7z
+*.rar
 
 # Snapshots / debug captures
 *.png
