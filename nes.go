@@ -46,16 +46,18 @@ func (n *NES) runCPUUntil(target uint64) {
 
 func (n *NES) StepFrame() {
 	frameStart := n.CPU.cycles
-	for scanline := 0; scanline < 262; scanline++ {
-		scanlineStart := frameStart + uint64(cpuCyclesPerFrame*scanline)/262
-		scanlineEnd := frameStart + uint64(cpuCyclesPerFrame*(scanline+1))/262
+	// Each iteration covers one 341-PPU-cycle slot (~113.67 CPU cycles).
+	// PPU.scanline is the authoritative "what's about to render next"; iter 0
+	// is pre-render (PPU.scanline=261), iter 1 renders scanline 0, etc. Use
+	// PPU.scanline (not the iteration index) for prediction so we consult v
+	// in the state it'll actually have when that scanline renders.
+	for i := 0; i < 262; i++ {
+		scanlineEnd := frameStart + uint64(cpuCyclesPerFrame*(i+1))/262
+		scanlineStart := frameStart + uint64(cpuCyclesPerFrame*i)/262
+		target := n.PPU.scanline
 
-		// Visible scanline with sprite-0 hit: split the render in two so the
-		// pre-hit pixels use the OLD scroll and the post-hit pixels use the
-		// NEW scroll the CPU writes after seeing the flag. This is what real
-		// hardware does and is what makes SMB's status-bar split look clean.
-		if scanline < 240 && n.PPU.status&statSpr0 == 0 {
-			hitX := n.PPU.predictSprite0Hit(scanline)
+		if target < 240 && n.PPU.status&statSpr0 == 0 {
+			hitX := n.PPU.predictSprite0Hit(target)
 			if hitX >= 0 {
 				hitTarget := scanlineStart + uint64(hitX+1)/3
 				if hitTarget > scanlineEnd {
@@ -64,18 +66,15 @@ func (n *NES) StepFrame() {
 				// 1. CPU runs up to the hit cycle (polling, flag not yet set).
 				n.runCPUUntil(hitTarget)
 				// 2. Render the pre-hit pixels with the current v.
-				n.PPU.beginScanlineRender(scanline)
+				n.PPU.beginScanlineRender(target)
 				n.PPU.renderBGRange(0, hitX+1)
 				// 3. Fire sprite-0 hit.
 				n.PPU.status |= statSpr0
-				// 4. Let CPU run the rest of the scanline's budget; that's
-				//    plenty of time for it to detect the flag and write the
-				//    new scroll (typically $2000 + $2005+$2005 + $2006+$2006,
-				//    ~20-30 CPU cycles).
+				// 4. Let CPU run the rest of the scanline's budget.
 				n.runCPUUntil(scanlineEnd)
 				// 5. Render the post-hit pixels with whatever v is now.
 				n.PPU.renderBGRange(hitX+1, 256)
-				n.PPU.endScanlineRender(scanline)
+				n.PPU.endScanlineRender(target)
 				n.PPU.scanline++
 				continue
 			}

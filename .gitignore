@@ -1,5 +1,6 @@
 # Build output
 balrog.exe
+balrog.exe~
 balrog
 *.exe
 *.test
