@@ -29,6 +29,10 @@ type mapper4 struct {
 	irqEnable bool
 	irqFlag   bool // pending IRQ asserted until $E000 acknowledge
 
+	// Diagnostic counters
+	clockCount int
+	irqClocks  int
+
 	prgBanks int // count of 8KB PRG banks
 	chrBanks int // count of 1KB CHR banks
 }
@@ -212,7 +216,12 @@ func (m *mapper4) ClockScanline() {
 	}
 	if m.irqCount == 0 && m.irqEnable {
 		m.irqFlag = true
+		m.irqClocks++
 	}
+	m.clockCount++
 }
+
+// Debug counters (not part of state).
+var _ = struct{}{} // silence
 
 func (m *mapper4) IRQPending() bool { return m.irqFlag }
