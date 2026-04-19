@@ -193,9 +193,11 @@ func (g *Game) installCart(cart *Cart, name string) {
 	}
 }
 
-// loadDroppedROM walks the dropped fs.FS, finds the first .nes file, reads it,
-// and installs it. Ebiten exposes dropped files as a virtual filesystem rather
-// than absolute paths (for WASM portability), so we read the bytes directly.
+// loadDroppedROM walks the dropped fs.FS, finds the first .nes file, and
+// installs it. Ebiten exposes dropped files as a virtual filesystem for WASM
+// compatibility, but on desktop the underlying fs.File is an *os.File whose
+// Name() method returns the real absolute path. We grab that so save states
+// can write next to the ROM (same as when it's opened via CLI or dialog).
 func (g *Game) loadDroppedROM(files fs.FS) {
 	var picked string
 	_ = fs.WalkDir(files, ".", func(p string, d fs.DirEntry, err error) error {
@@ -217,8 +219,13 @@ func (g *Game) loadDroppedROM(files fs.FS) {
 		g.setStatus("open dropped: "+err.Error(), 3*time.Second)
 		return
 	}
-	defer f.Close()
+	// Recover the real filesystem path if available (desktop/glfw case).
+	realPath := picked
+	if nf, ok := f.(interface{ Name() string }); ok {
+		realPath = nf.Name()
+	}
 	data, err := io.ReadAll(f)
+	f.Close()
 	if err != nil {
 		g.setStatus("read dropped: "+err.Error(), 3*time.Second)
 		return
@@ -228,7 +235,8 @@ func (g *Game) loadDroppedROM(files fs.FS) {
 		g.setStatus("load failed: "+err.Error(), 4*time.Second)
 		return
 	}
-	g.installCart(cart, filepath.Base(picked))
+	g.romPath = realPath
+	g.installCart(cart, filepath.Base(realPath))
 }
 
 func (g *Game) setStatus(s string, d time.Duration) {
