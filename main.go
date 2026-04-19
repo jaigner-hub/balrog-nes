@@ -54,6 +54,9 @@ type Game struct {
 	loading     atomic.Bool
 	statusMsg   string
 	statusUntil time.Time
+
+	audioPlayer *audio.Player
+	audioStarted bool
 }
 
 func (g *Game) nes() *NES { return g.nesPtr.Load() }
@@ -170,6 +173,12 @@ func (g *Game) installCart(cart *Cart, name string) {
 	ebiten.SetWindowTitle("balrog NES - " + name)
 	g.frames = 0
 	g.setStatus(fmt.Sprintf("loaded %s (mapper %d)", name, cart.MapperID), 2*time.Second)
+	// Start audio on first ROM load. Holding off until now keeps the audio
+	// pipeline from buffering up silence while the user picks a file.
+	if g.audioPlayer != nil && !g.audioStarted {
+		g.audioPlayer.Play()
+		g.audioStarted = true
+	}
 }
 
 // loadDroppedROM walks the dropped fs.FS, finds the first .nes file, reads it,
@@ -364,7 +373,14 @@ func main() {
 		log.Fatalf("audio player: %v", err)
 	}
 	player.SetBufferSize(200 * time.Millisecond)
-	player.Play()
+	g.audioPlayer = player
+	// If a ROM was passed on the command line, loadROM already ran and
+	// installCart will have started the player. Otherwise we leave it paused
+	// until the user opens a ROM via F1 / drag-drop.
+	if g.nes() != nil && !g.audioStarted {
+		player.Play()
+		g.audioStarted = true
+	}
 
 	// CLI scripting flags (work whether or not a ROM was given upfront)
 	btns := map[string]byte{
