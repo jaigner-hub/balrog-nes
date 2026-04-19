@@ -50,13 +50,24 @@ type Game struct {
 	presses []pressSpec
 	exitAt  uint64
 
+	romPath     string
 	romName     string
 	loading     atomic.Bool
 	statusMsg   string
 	statusUntil time.Time
 
-	audioPlayer *audio.Player
+	audioPlayer  *audio.Player
 	audioStarted bool
+}
+
+// statePath returns the path of the save-state file for the current ROM.
+// e.g. "/games/mario.nes" -> "/games/mario.state".
+func (g *Game) statePath() string {
+	if g.romPath == "" {
+		return ""
+	}
+	ext := filepath.Ext(g.romPath)
+	return g.romPath[:len(g.romPath)-len(ext)] + ".state"
 }
 
 func (g *Game) nes() *NES { return g.nesPtr.Load() }
@@ -163,6 +174,7 @@ func (g *Game) loadROM(path string) {
 		g.setStatus("load failed: "+err.Error(), 4*time.Second)
 		return
 	}
+	g.romPath = path
 	g.installCart(cart, filepath.Base(path))
 }
 
@@ -224,6 +236,47 @@ func (g *Game) setStatus(s string, d time.Duration) {
 	g.statusUntil = time.Now().Add(d)
 }
 
+func (g *Game) saveState() {
+	nes := g.nes()
+	if nes == nil {
+		g.setStatus("no ROM loaded", 2*time.Second)
+		return
+	}
+	path := g.statePath()
+	if path == "" {
+		g.setStatus("no ROM path; can't save state", 2*time.Second)
+		return
+	}
+	if err := WriteStateFile(path, nes.Snapshot()); err != nil {
+		g.setStatus("save state: "+err.Error(), 4*time.Second)
+		return
+	}
+	g.setStatus("state saved -> "+filepath.Base(path), 2*time.Second)
+}
+
+func (g *Game) loadState() {
+	nes := g.nes()
+	if nes == nil {
+		g.setStatus("no ROM loaded", 2*time.Second)
+		return
+	}
+	path := g.statePath()
+	if path == "" {
+		g.setStatus("no ROM path; can't load state", 2*time.Second)
+		return
+	}
+	st, err := ReadStateFile(path)
+	if err != nil {
+		g.setStatus("load state: "+err.Error(), 4*time.Second)
+		return
+	}
+	if err := nes.Restore(st); err != nil {
+		g.setStatus("restore: "+err.Error(), 4*time.Second)
+		return
+	}
+	g.setStatus("state loaded <- "+filepath.Base(path), 2*time.Second)
+}
+
 func (g *Game) Update() error {
 	// Hotkeys: F1 / Ctrl+O = open file dialog; F5 = reset
 	if inpututil.IsKeyJustPressed(ebiten.KeyF1) ||
@@ -235,6 +288,12 @@ func (g *Game) Update() error {
 			nes.CPU.Reset()
 			g.setStatus("reset", time.Second)
 		}
+	}
+	if inpututil.IsKeyJustPressed(ebiten.KeyF2) {
+		g.saveState()
+	}
+	if inpututil.IsKeyJustPressed(ebiten.KeyF4) {
+		g.loadState()
 	}
 	// Drag-and-drop: load any .nes file dropped on the window.
 	if files := ebiten.DroppedFiles(); files != nil {
