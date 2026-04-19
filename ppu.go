@@ -4,6 +4,11 @@ package main
 // Timing: 262 scanlines/frame, 341 cycles/scanline. Scanlines:
 //   -1 (pre-render), 0..239 (visible), 240 (post), 241..260 (VBlank).
 
+type bgPix struct {
+	color byte // palette index (0..63) or 0 if transparent; bit 7 = "opaque"
+	pal   byte // lower 2 bits of pattern (for sprite priority check)
+}
+
 type PPU struct {
 	cart *Cart
 
@@ -40,6 +45,10 @@ type PPU struct {
 
 	// For sprite0 hit check
 	spr0Line bool
+
+	// Per-scanline scratch: filled by renderBGRange (possibly in parts) and
+	// consumed by endScanlineRender when combining with sprites.
+	bgRow [256]bgPix
 }
 
 const (
@@ -250,70 +259,72 @@ func (p *PPU) incY() {
 func (p *PPU) copyX() { p.v = (p.v & 0xFBE0) | (p.t & 0x041F) }
 func (p *PPU) copyY() { p.v = (p.v & 0x841F) | (p.t & 0x7BE0) }
 
-// Render a single scanline's background pixels (tile-granular fetching).
-// Produces indices 0..3 per pixel (palette-within-palette) and palette set 0..3.
-// To keep the implementation small we operate per-pixel using current v/x.
-func (p *PPU) renderScanline(y int) {
-	row := &p.Frame
+// Rendering is done in three phases so NES.StepFrame can insert CPU cycles
+// mid-scanline on the sprite-0 hit line (for accurate mid-scanline scroll
+// splits in SMB etc.):
+//   beginScanlineRender(y)        — fill the universal bg, clear bgRow
+//   renderBGRange(startPx, endPx) — render BG pixels over a range, advancing v
+//   endScanlineRender(y)          — incY+copyX, sprite pass, commit row to frame
+
+func (p *PPU) beginScanlineRender(y int) {
 	universal := p.palette[0] & 0x3F
 	bg := nesPalette[universal]
-	// Fill background universal color first
+	base := y * 256
 	for x := 0; x < 256; x++ {
-		row[y*256+x] = bg
+		p.Frame[base+x] = bg
 	}
-	if p.mask&maskRender == 0 {
+	p.bgRow = [256]bgPix{}
+}
+
+// renderBGRange renders BG pixels [startPx, endPx). v advances as we go;
+// it's valid for v to have been overwritten by a $2006/$2005+$2006 sequence
+// between two renderBGRange calls — the next pixels just use the new v.
+func (p *PPU) renderBGRange(startPx, endPx int) {
+	if p.mask&maskRender == 0 || p.mask&maskShowBg == 0 {
 		return
 	}
-
-	// Render background
-	type bgPix struct {
-		color byte // palette index (0..63) or 0 if transparent
-		pal   byte // lower 2 bits of pattern (for sprite priority check)
-	}
-	var bgRow [256]bgPix
-
-	if p.mask&maskShowBg != 0 {
-		for px := 0; px < 256; px++ {
-			if px < 8 && p.mask&maskLeftBg == 0 {
-				continue
-			}
-			fineX := (int(p.x) + px) & 7
-			if px > 0 && fineX == 0 {
-				p.incCoarseX()
-			}
-			// Fetch tile info
-			ntAddr := 0x2000 | (p.v & 0x0FFF)
-			tile := p.vramRead(ntAddr)
-			atAddr := 0x23C0 | (p.v & 0x0C00) | ((p.v >> 4) & 0x38) | ((p.v >> 2) & 0x07)
-			attr := p.vramRead(atAddr)
-			shift := ((p.v >> 4) & 4) | (p.v & 2)
-			palSel := (attr >> shift) & 0x03
-			fineY := (p.v >> 12) & 7
-			ptBase := uint16(0)
-			if p.ctrl&ctrlBgPtable != 0 {
-				ptBase = 0x1000
-			}
-			lo := p.vramRead(ptBase + uint16(tile)*16 + fineY)
-			hi := p.vramRead(ptBase + uint16(tile)*16 + fineY + 8)
-			bit := byte(7 - fineX)
-			c := ((lo >> bit) & 1) | (((hi >> bit) & 1) << 1)
-			if c != 0 {
-				palIdx := p.palette[palSel*4+c] & 0x3F
-				bgRow[px] = bgPix{color: palIdx | 0x80, pal: c}
-			}
+	for px := startPx; px < endPx; px++ {
+		if px < 8 && p.mask&maskLeftBg == 0 {
+			continue
 		}
-		// end of scanline: incY + copyX
+		fineX := (int(p.x) + px) & 7
+		if px > 0 && fineX == 0 {
+			p.incCoarseX()
+		}
+		ntAddr := 0x2000 | (p.v & 0x0FFF)
+		tile := p.vramRead(ntAddr)
+		atAddr := 0x23C0 | (p.v & 0x0C00) | ((p.v >> 4) & 0x38) | ((p.v >> 2) & 0x07)
+		attr := p.vramRead(atAddr)
+		shift := ((p.v >> 4) & 4) | (p.v & 2)
+		palSel := (attr >> shift) & 0x03
+		fineY := (p.v >> 12) & 7
+		ptBase := uint16(0)
+		if p.ctrl&ctrlBgPtable != 0 {
+			ptBase = 0x1000
+		}
+		lo := p.vramRead(ptBase + uint16(tile)*16 + fineY)
+		hi := p.vramRead(ptBase + uint16(tile)*16 + fineY + 8)
+		bit := byte(7 - fineX)
+		c := ((lo >> bit) & 1) | (((hi >> bit) & 1) << 1)
+		if c != 0 {
+			palIdx := p.palette[palSel*4+c] & 0x3F
+			p.bgRow[px] = bgPix{color: palIdx | 0x80, pal: c}
+		}
+	}
+}
+
+func (p *PPU) endScanlineRender(y int) {
+	if p.mask&maskRender != 0 {
 		p.incY()
 		p.copyX()
 	}
 
-	// Sprites
+	// Sprites for full scanline
 	if p.mask&maskShowSpr != 0 {
 		spriteH := 8
 		if p.ctrl&ctrlSprSize != 0 {
 			spriteH = 16
 		}
-		// Collect up to 8 sprites on this scanline
 		type sp struct{ idx, x, y, tile, attr int }
 		var sprs []sp
 		for i := 0; i < 64; i++ {
@@ -332,7 +343,6 @@ func (p *PPU) renderScanline(y int) {
 				break
 			}
 		}
-		// Later sprites (higher idx) drawn first so earlier overwrite
 		for i := len(sprs) - 1; i >= 0; i-- {
 			s := sprs[i]
 			flipH := s.attr&0x40 != 0
@@ -376,25 +386,32 @@ func (p *PPU) renderScanline(y int) {
 				if c == 0 {
 					continue
 				}
-				// Sprite 0 hit
-				if s.idx == 0 && bgRow[sx].color&0x80 != 0 && p.mask&maskShowBg != 0 && sx != 255 {
+				if s.idx == 0 && p.bgRow[sx].color&0x80 != 0 && p.mask&maskShowBg != 0 && sx != 255 {
 					p.status |= statSpr0
 				}
-				if bgPri && bgRow[sx].color&0x80 != 0 {
+				if bgPri && p.bgRow[sx].color&0x80 != 0 {
 					continue
 				}
 				palIdx := p.palette[0x10+palSel*4+c] & 0x3F
-				bgRow[sx] = bgPix{color: palIdx | 0x80}
+				p.bgRow[sx] = bgPix{color: palIdx | 0x80}
 			}
 		}
 	}
 
-	// Commit bgRow + background fallback to frame
+	base := y * 256
 	for px := 0; px < 256; px++ {
-		if bgRow[px].color&0x80 != 0 {
-			row[y*256+px] = nesPalette[bgRow[px].color&0x3F]
+		if p.bgRow[px].color&0x80 != 0 {
+			p.Frame[base+px] = nesPalette[p.bgRow[px].color&0x3F]
 		}
 	}
+}
+
+// renderScanline is the old single-call entry point, used by StepScanline for
+// non-hit scanlines where we don't need to split mid-way.
+func (p *PPU) renderScanline(y int) {
+	p.beginScanlineRender(y)
+	p.renderBGRange(0, 256)
+	p.endScanlineRender(y)
 }
 
 // predictSprite0Hit walks sprite 0 against the background for scanline y

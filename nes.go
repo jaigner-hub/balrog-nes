@@ -50,20 +50,34 @@ func (n *NES) StepFrame() {
 		scanlineStart := frameStart + uint64(cpuCyclesPerFrame*scanline)/262
 		scanlineEnd := frameStart + uint64(cpuCyclesPerFrame*(scanline+1))/262
 
-		// On visible scanlines: predict sprite-0 hit and pre-set the flag at
-		// the right cycle so the CPU's $2002 polling loop sees it mid-scanline,
-		// not on the next scanline. This mirrors hardware timing closely enough
-		// to stop the SMB status-bar split from wandering.
+		// Visible scanline with sprite-0 hit: split the render in two so the
+		// pre-hit pixels use the OLD scroll and the post-hit pixels use the
+		// NEW scroll the CPU writes after seeing the flag. This is what real
+		// hardware does and is what makes SMB's status-bar split look clean.
 		if scanline < 240 && n.PPU.status&statSpr0 == 0 {
-			if hitX := n.PPU.predictSprite0Hit(scanline); hitX >= 0 {
-				// PPU pixel X corresponds to PPU cycle X+1, which is CPU cycle
-				// (X+1)/3 into the scanline.
+			hitX := n.PPU.predictSprite0Hit(scanline)
+			if hitX >= 0 {
 				hitTarget := scanlineStart + uint64(hitX+1)/3
 				if hitTarget > scanlineEnd {
 					hitTarget = scanlineEnd
 				}
+				// 1. CPU runs up to the hit cycle (polling, flag not yet set).
 				n.runCPUUntil(hitTarget)
+				// 2. Render the pre-hit pixels with the current v.
+				n.PPU.beginScanlineRender(scanline)
+				n.PPU.renderBGRange(0, hitX+1)
+				// 3. Fire sprite-0 hit.
 				n.PPU.status |= statSpr0
+				// 4. Let CPU run the rest of the scanline's budget; that's
+				//    plenty of time for it to detect the flag and write the
+				//    new scroll (typically $2000 + $2005+$2005 + $2006+$2006,
+				//    ~20-30 CPU cycles).
+				n.runCPUUntil(scanlineEnd)
+				// 5. Render the post-hit pixels with whatever v is now.
+				n.PPU.renderBGRange(hitX+1, 256)
+				n.PPU.endScanlineRender(scanline)
+				n.PPU.scanline++
+				continue
 			}
 		}
 		n.runCPUUntil(scanlineEnd)
