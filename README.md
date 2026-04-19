@@ -11,7 +11,7 @@ Working:
 - 6502 CPU (all legal opcodes plus the common illegal ones — `LAX`, `SAX`, `DCP`, `ISB`, `SLO`, `RLA`, `SRE`, `RRA`)
 - Scanline-accurate PPU with background, sprites (8×8 and 8×16), sprite-0 hit, palette, OAM DMA
 - iNES loader
-- Mappers: **NROM (0)**, **MMC1 (1)**
+- Mappers: **NROM (0)**, **MMC1 (1)**, **UxROM (2)**, **CNROM (3)**, **MMC3 (4)** — with MMC3's scanline IRQ for status-bar splits in SMB3 etc.
 - APU: pulse × 2 (with envelope and sweep), triangle, noise, DMC (sample playback); NES hardware filter chain (90 Hz HP → 440 Hz HP → 14 kHz LP)
 - Keyboard input, standard-gamepad input (8BitDo, Xbox, DualShock — anything Ebiten recognizes)
 - File-open GUI: native dialog, drag-and-drop, recent reset
@@ -19,7 +19,6 @@ Working:
 
 Not yet implemented:
 
-- Other mappers (UxROM/2, CNROM/3, MMC3/4, etc.)
 - Battery-backed save RAM persistence (Zelda's in-game save isn't written to disk yet)
 - Per-cycle PPU (causes occasional jitter on SMB's status bar split)
 
@@ -93,6 +92,9 @@ Buttons: `A`, `B`, `SELECT`, `START`, `UP`, `DOWN`, `LEFT`, `RIGHT`.
 | `cart.go`     | iNES loader, mapper interface                    |
 | `mapper0.go`  | NROM mapper                                      |
 | `mapper1.go`  | MMC1 mapper                                      |
+| `mapper2.go`  | UxROM mapper                                     |
+| `mapper3.go`  | CNROM mapper                                     |
+| `mapper4.go`  | MMC3 mapper (scanline IRQ, bank switching)       |
 | `state.go`    | Save state serialization (gob)                   |
 
 ## Credits

@@ -1,10 +1,25 @@
 package main
 
+// Optional interfaces a mapper can implement to participate in scanline-based
+// IRQ counting (used by MMC3 and its cousins). We type-assert at runtime, so
+// older mappers that don't need this don't have to implement it.
+type scanlineCounter interface {
+	ClockScanline()
+}
+type irqMapper interface {
+	IRQPending() bool
+}
+
 type NES struct {
 	Bus *NESBus
 	CPU *CPU
 	PPU *PPU
 	APU *APU
+
+	// Cached type assertions against the current cart's mapper. nil if the
+	// mapper doesn't implement the corresponding interface.
+	scanlineCounter scanlineCounter
+	irqMapper       irqMapper
 }
 
 func NewNES(cart *Cart, sampleRate float64) *NES {
@@ -16,7 +31,14 @@ func NewNES(cart *Cart, sampleRate float64) *NES {
 	apu.bus = bus // DMC reads sample bytes via the bus
 	apu.cpu = cpu // DMC adds CPU stall during DMA fetches
 	cpu.Reset()
-	return &NES{Bus: bus, CPU: cpu, PPU: ppu, APU: apu}
+	n := &NES{Bus: bus, CPU: cpu, PPU: ppu, APU: apu}
+	if sc, ok := cart.mapper.(scanlineCounter); ok {
+		n.scanlineCounter = sc
+	}
+	if irq, ok := cart.mapper.(irqMapper); ok {
+		n.irqMapper = irq
+	}
+	return n
 }
 
 // StepFrame runs CPU + PPU + APU until a frame completes.
@@ -41,6 +63,31 @@ func (n *NES) runCPUUntil(target uint64) {
 		if n.APU.DMC.irqPending {
 			n.CPU.IRQ()
 		}
+		if n.irqMapper != nil && n.irqMapper.IRQPending() {
+			n.CPU.IRQ()
+		}
+	}
+}
+
+// clockMapperScanline fires the mapper's scanline counter at the end of
+// each visible scanline (and pre-render) when rendering is enabled. That's
+// how MMC3 approximates the PPU-A12 rising-edge count real hardware does.
+func (n *NES) clockMapperScanline() {
+	if n.scanlineCounter == nil {
+		return
+	}
+	if n.PPU.mask&(maskShowBg|maskShowSpr) == 0 {
+		return
+	}
+	// Previous StepScanline has already advanced PPU.scanline, so the line
+	// that just rendered is scanline-1 (mod 262). Fire for visible and
+	// pre-render only.
+	prev := n.PPU.scanline - 1
+	if prev < 0 {
+		prev = 261
+	}
+	if prev < 240 || prev == 261 {
+		n.scanlineCounter.ClockScanline()
 	}
 }
 
@@ -76,11 +123,14 @@ func (n *NES) StepFrame() {
 				n.PPU.renderBGRange(hitX+1, 256)
 				n.PPU.endScanlineRender(target)
 				n.PPU.scanline++
+				n.clockMapperScanline()
 				continue
 			}
 		}
 		n.runCPUUntil(scanlineEnd)
-		if n.PPU.StepScanline() {
+		done := n.PPU.StepScanline()
+		n.clockMapperScanline()
+		if done {
 			return
 		}
 	}
