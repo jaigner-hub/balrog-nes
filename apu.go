@@ -16,11 +16,12 @@ import (
 // reader pulls from here and converts to 16-bit stereo.
 
 // We match the rate the rest of the emulator actually runs at — 60 ticks per
-// second times cpuCyclesPerFrame — so the audio sample rate exactly matches
-// the Ebiten output rate. (Real NTSC is 1789773; we're 0.17% slower because
-// Ebiten ticks at exactly 60 Hz, not 60.0988 Hz. Matching what we do, not
-// what real hardware does, keeps the ring buffer balanced.)
-const cpuHz = float64(cpuCyclesPerFrame) * 60.0
+// second times nominal CPU cycles per frame — so the audio sample rate
+// exactly matches the Ebiten 44.1 kHz output rate. (Real NTSC is 1789773;
+// we're ~0.17% slower because Ebiten ticks at exactly 60 Hz, not 60.0988 Hz.
+// Matching what we do, not what real hardware does, keeps the ring buffer
+// balanced — drift would manifest as dropped samples or silence.)
+const cpuHz = 29780.0 * 60.0
 
 var lengthTable = [32]byte{
 	10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14,

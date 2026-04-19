@@ -1,13 +1,18 @@
 package main
 
-// NES 2C02 PPU. Scanline-accurate enough to run Mapper-0 games.
-// Timing: 262 scanlines/frame, 341 cycles/scanline. Scanlines:
-//   -1 (pre-render), 0..239 (visible), 240 (post), 241..260 (VBlank).
-
-type bgPix struct {
-	color byte // palette index (0..63) or 0 if transparent; bit 7 = "opaque"
-	pal   byte // lower 2 bits of pattern (for sprite priority check)
-}
+// NES 2C02 PPU — cycle-accurate rendering.
+//
+// The PPU runs at 3x CPU rate: 341 cycles per scanline, 262 scanlines per
+// frame. Scanlines: 0..239 visible, 240 post-render, 241..260 VBlank, 261
+// pre-render. Cycle 0 is idle; cycles 1..256 output BG pixels and fetch BG
+// tiles for the current scanline; cycles 257..320 fetch sprites for the
+// next scanline; cycles 321..336 fetch the first two BG tiles for the next
+// scanline.
+//
+// Each PPU Step() advances one PPU cycle. Fetches go through vramRead,
+// which also drives the A12 line — the PPU A12 rising edges are what
+// clocks the MMC3 scanline counter. With this running per-fetch, MMC3
+// games like SMB3 and Kirby get IRQs on the right scanline every frame.
 
 type PPU struct {
 	cart *Cart
@@ -27,7 +32,7 @@ type PPU struct {
 	w byte   // write toggle (1 bit)
 
 	// Memory
-	nt      [2][1024]byte // two 1KB nametables
+	nt      [2][1024]byte
 	palette [32]byte
 	oam     [256]byte
 
@@ -37,18 +42,42 @@ type PPU struct {
 	frame    uint64
 	odd      bool
 
-	// Output framebuffer: 256x240 palette indices -> RGBA
+	// Output framebuffer
 	Frame [256 * 240]uint32
 
 	// Interrupt line to CPU
 	NMIPending bool
 
-	// For sprite0 hit check
-	spr0Line bool
+	// --- BG rendering state ---
+	// Latches filled during tile fetches
+	bgNTByte      byte
+	bgATByte      byte
+	bgPatternLo   byte
+	bgPatternHi   byte
+	// 16-bit shift registers: each cycle shifts one bit out; every 8 cycles
+	// a freshly fetched tile pair is loaded into the high byte.
+	bgShiftPatternLo uint16
+	bgShiftPatternHi uint16
+	bgShiftAttribLo  uint16
+	bgShiftAttribHi  uint16
+	bgAttribLatchLo  byte
+	bgAttribLatchHi  byte
 
-	// Per-scanline scratch: filled by renderBGRange (possibly in parts) and
-	// consumed by endScanlineRender when combining with sprites.
-	bgRow [256]bgPix
+	// --- Sprite rendering state ---
+	secondaryOAM [8 * 4]byte
+	numSprites   int
+	spriteHasS0  bool // current scanline's secondaryOAM includes sprite 0
+	nextHasS0    bool // set during eval for the next scanline
+	// Per-output-sprite latches (for current scanline)
+	sprPatternLo [8]byte
+	sprPatternHi [8]byte
+	sprAttr      [8]byte
+	sprX         [8]byte
+	sprIsS0      [8]bool
+
+	// --- MMC3 A12 tracking ---
+	a12State       bool
+	a12LowCycles   int
 }
 
 const (
@@ -70,7 +99,7 @@ const (
 	statSprOv  = 0x20
 )
 
-// NES palette — 2C02 RGB approximation (common Nintendulator/Kevtris table)
+// NES palette (2C02 RGB approximation)
 var nesPalette = [64]uint32{
 	0x626262FF, 0x001FB2FF, 0x2404C8FF, 0x5200B2FF, 0x730076FF, 0x800024FF, 0x730B00FF, 0x522800FF,
 	0x244400FF, 0x005700FF, 0x005C00FF, 0x005324FF, 0x003C76FF, 0x000000FF, 0x000000FF, 0x000000FF,
@@ -82,16 +111,15 @@ var nesPalette = [64]uint32{
 	0xE9E681FF, 0xCEF481FF, 0xB6FB9AFF, 0xA9FAC3FF, 0xA9F0F4FF, 0xB8B8B8FF, 0x000000FF, 0x000000FF,
 }
 
-func NewPPU(c *Cart) *PPU { return &PPU{cart: c, scanline: 261} }
+func NewPPU(c *Cart) *PPU { return &PPU{cart: c, scanline: 261, a12LowCycles: 1000} }
 
-// Mirroring: convert nametable VRAM address to internal index.
+// Nametable mirroring
 func (p *PPU) mirrorNT(addr uint16) (bank, idx int) {
 	addr = (addr - 0x2000) & 0x0FFF
 	table := addr / 0x0400
 	offs := int(addr & 0x03FF)
 	switch p.cart.MirrorMode() {
 	case MirrorHorizontal:
-		// NT0/NT1 share, NT2/NT3 share -> map to bank 0 and 1
 		if table < 2 {
 			return 0, offs
 		}
@@ -106,7 +134,12 @@ func (p *PPU) mirrorNT(addr uint16) (bank, idx int) {
 	return int(table & 1), offs
 }
 
+// vramRead routes a PPU address to the right backing memory and also
+// tracks the A12 line. A low→high A12 transition, when A12 has been low
+// for at least ~12 PPU cycles, clocks the mapper's scanline counter
+// (MMC3 hook). This is how MMC3 decides when to fire an IRQ in hardware.
 func (p *PPU) vramRead(addr uint16) byte {
+	p.updateA12(addr)
 	addr &= 0x3FFF
 	switch {
 	case addr < 0x2000:
@@ -124,6 +157,7 @@ func (p *PPU) vramRead(addr uint16) byte {
 }
 
 func (p *PPU) vramWrite(addr uint16, v byte) {
+	p.updateA12(addr)
 	addr &= 0x3FFF
 	switch {
 	case addr < 0x2000:
@@ -140,7 +174,21 @@ func (p *PPU) vramWrite(addr uint16, v byte) {
 	}
 }
 
-// CPU reads $2000-$2007 (mirrored 0x2000-0x3FFF).
+func (p *PPU) updateA12(addr uint16) {
+	newA12 := addr&0x1000 != 0
+	if !p.a12State && newA12 && p.a12LowCycles >= 12 {
+		if sc, ok := p.cart.mapper.(scanlineCounter); ok {
+			sc.ClockScanline()
+		}
+	}
+	if newA12 {
+		p.a12LowCycles = 0
+	}
+	// a12LowCycles is otherwise incremented by Step() on each PPU cycle.
+	p.a12State = newA12
+}
+
+// CPU <-> PPU register interface
 func (p *PPU) CPURead(addr uint16) byte {
 	reg := addr & 7
 	switch reg {
@@ -179,36 +227,31 @@ func (p *PPU) CPUWrite(addr uint16, val byte) {
 	p.busLat = val
 	reg := addr & 7
 	switch reg {
-	case 0: // PPUCTRL
+	case 0:
 		oldNMI := p.ctrl&ctrlNmi != 0
 		p.ctrl = val
-		// t: ....BA.. ........ = d: ......BA
 		p.t = (p.t & 0xF3FF) | (uint16(val&0x03) << 10)
-		// Toggling NMI on during VBlank triggers NMI
 		if !oldNMI && p.ctrl&ctrlNmi != 0 && p.status&statVBlank != 0 {
 			p.NMIPending = true
 		}
-	case 1: // PPUMASK
+	case 1:
 		p.mask = val
-	case 3: // OAMADDR
+	case 3:
 		p.oamAddr = val
-	case 4: // OAMDATA
+	case 4:
 		p.oam[p.oamAddr] = val
 		p.oamAddr++
-	case 5: // PPUSCROLL
+	case 5:
 		if p.w == 0 {
-			// t: ........ ...HGFED = d: HGFED...
-			// x: CBA              = d: .....CBA
 			p.t = (p.t & 0xFFE0) | uint16(val>>3)
 			p.x = val & 0x07
 			p.w = 1
 		} else {
-			// t: .CBA..HG FED..... = d: HGFEDCBA
 			p.t = (p.t & 0x8FFF) | (uint16(val&0x07) << 12)
 			p.t = (p.t & 0xFC1F) | (uint16(val&0xF8) << 2)
 			p.w = 0
 		}
-	case 6: // PPUADDR
+	case 6:
 		if p.w == 0 {
 			p.t = (p.t & 0x00FF) | (uint16(val&0x3F) << 8)
 			p.w = 1
@@ -217,7 +260,7 @@ func (p *PPU) CPUWrite(addr uint16, val byte) {
 			p.v = p.t
 			p.w = 0
 		}
-	case 7: // PPUDATA
+	case 7:
 		p.vramWrite(p.v&0x3FFF, val)
 		if p.ctrl&ctrlVramInc != 0 {
 			p.v += 32
@@ -231,7 +274,7 @@ func (p *PPU) CPUWrite(addr uint16, val byte) {
 func (p *PPU) incCoarseX() {
 	if p.v&0x001F == 31 {
 		p.v &^= 0x001F
-		p.v ^= 0x0400 // switch horizontal NT
+		p.v ^= 0x0400
 	} else {
 		p.v++
 	}
@@ -246,7 +289,7 @@ func (p *PPU) incY() {
 		switch y {
 		case 29:
 			y = 0
-			p.v ^= 0x0800 // switch vertical NT
+			p.v ^= 0x0800
 		case 31:
 			y = 0
 		default:
@@ -259,317 +302,374 @@ func (p *PPU) incY() {
 func (p *PPU) copyX() { p.v = (p.v & 0xFBE0) | (p.t & 0x041F) }
 func (p *PPU) copyY() { p.v = (p.v & 0x841F) | (p.t & 0x7BE0) }
 
-// Rendering is done in three phases so NES.StepFrame can insert CPU cycles
-// mid-scanline on the sprite-0 hit line (for accurate mid-scanline scroll
-// splits in SMB etc.):
-//   beginScanlineRender(y)        — fill the universal bg, clear bgRow
-//   renderBGRange(startPx, endPx) — render BG pixels over a range, advancing v
-//   endScanlineRender(y)          — incY+copyX, sprite pass, commit row to frame
+// --- BG fetch pipeline ---
+//
+// On real hardware, each 8-cycle slot fetches: NT byte (cycle 1), AT byte
+// (cycle 3), pattern lo (cycle 5), pattern hi (cycle 7). At cycle 0 of the
+// next slot, the 8-bit pattern latches become the high byte of the 16-bit
+// shift registers, and the attribute latches are refilled from the 2-bit
+// palette bits for that tile.
 
-func (p *PPU) beginScanlineRender(y int) {
-	universal := p.palette[0] & 0x3F
-	bg := nesPalette[universal]
-	base := y * 256
-	for x := 0; x < 256; x++ {
-		p.Frame[base+x] = bg
-	}
-	p.bgRow = [256]bgPix{}
+func (p *PPU) fetchNT() {
+	addr := 0x2000 | (p.v & 0x0FFF)
+	p.bgNTByte = p.vramRead(addr)
 }
 
-// renderBGRange renders BG pixels [startPx, endPx). v advances as we go;
-// it's valid for v to have been overwritten by a $2006/$2005+$2006 sequence
-// between two renderBGRange calls — the next pixels just use the new v.
-func (p *PPU) renderBGRange(startPx, endPx int) {
-	if p.mask&maskRender == 0 || p.mask&maskShowBg == 0 {
+func (p *PPU) fetchAT() {
+	addr := 0x23C0 | (p.v & 0x0C00) | ((p.v >> 4) & 0x38) | ((p.v >> 2) & 0x07)
+	attr := p.vramRead(addr)
+	shift := ((p.v >> 4) & 4) | (p.v & 2)
+	p.bgATByte = (attr >> shift) & 0x03
+}
+
+func (p *PPU) fetchBGPatternLo() {
+	fineY := (p.v >> 12) & 7
+	ptBase := uint16(0)
+	if p.ctrl&ctrlBgPtable != 0 {
+		ptBase = 0x1000
+	}
+	p.bgPatternLo = p.vramRead(ptBase + uint16(p.bgNTByte)*16 + fineY)
+}
+
+func (p *PPU) fetchBGPatternHi() {
+	fineY := (p.v >> 12) & 7
+	ptBase := uint16(0)
+	if p.ctrl&ctrlBgPtable != 0 {
+		ptBase = 0x1000
+	}
+	p.bgPatternHi = p.vramRead(ptBase + uint16(p.bgNTByte)*16 + fineY + 8)
+}
+
+func (p *PPU) loadBGShifters() {
+	p.bgShiftPatternLo = (p.bgShiftPatternLo & 0xFF00) | uint16(p.bgPatternLo)
+	p.bgShiftPatternHi = (p.bgShiftPatternHi & 0xFF00) | uint16(p.bgPatternHi)
+	p.bgAttribLatchLo = p.bgATByte & 1
+	p.bgAttribLatchHi = (p.bgATByte >> 1) & 1
+}
+
+func (p *PPU) shiftBG() {
+	if p.mask&maskShowBg == 0 {
 		return
 	}
-	for px := startPx; px < endPx; px++ {
-		if px < 8 && p.mask&maskLeftBg == 0 {
-			continue
-		}
-		fineX := (int(p.x) + px) & 7
-		if px > 0 && fineX == 0 {
-			p.incCoarseX()
-		}
-		ntAddr := 0x2000 | (p.v & 0x0FFF)
-		tile := p.vramRead(ntAddr)
-		atAddr := 0x23C0 | (p.v & 0x0C00) | ((p.v >> 4) & 0x38) | ((p.v >> 2) & 0x07)
-		attr := p.vramRead(atAddr)
-		shift := ((p.v >> 4) & 4) | (p.v & 2)
-		palSel := (attr >> shift) & 0x03
-		fineY := (p.v >> 12) & 7
-		ptBase := uint16(0)
-		if p.ctrl&ctrlBgPtable != 0 {
-			ptBase = 0x1000
-		}
-		lo := p.vramRead(ptBase + uint16(tile)*16 + fineY)
-		hi := p.vramRead(ptBase + uint16(tile)*16 + fineY + 8)
-		bit := byte(7 - fineX)
-		c := ((lo >> bit) & 1) | (((hi >> bit) & 1) << 1)
-		if c != 0 {
-			palIdx := p.palette[palSel*4+c] & 0x3F
-			p.bgRow[px] = bgPix{color: palIdx | 0x80, pal: c}
-		}
-	}
+	p.bgShiftPatternLo <<= 1
+	p.bgShiftPatternHi <<= 1
+	p.bgShiftAttribLo = (p.bgShiftAttribLo << 1) | uint16(p.bgAttribLatchLo)
+	p.bgShiftAttribHi = (p.bgShiftAttribHi << 1) | uint16(p.bgAttribLatchHi)
 }
 
-func (p *PPU) endScanlineRender(y int) {
-	if p.mask&maskRender != 0 {
-		p.incY()
-		p.copyX()
-	}
+// --- Sprite evaluation & fetch ---
 
-	// Sprites for full scanline
-	if p.mask&maskShowSpr != 0 {
-		spriteH := 8
-		if p.ctrl&ctrlSprSize != 0 {
-			spriteH = 16
+// evaluateSpritesForNextLine picks up to 8 sprites whose Y range covers the
+// next scanline, copies them to secondary OAM in OAM order, and notes
+// whether sprite 0 is among them. We do it at cycle 257 in one shot —
+// real hardware spreads this over cycles 65..256 of the current scanline,
+// but the end result (which sprites end up in secondary OAM) is the same.
+func (p *PPU) evaluateSpritesForNextLine() {
+	nextLine := p.scanline + 1
+	if nextLine >= 240 {
+		p.numSprites = 0
+		p.nextHasS0 = false
+		return
+	}
+	spriteH := 8
+	if p.ctrl&ctrlSprSize != 0 {
+		spriteH = 16
+	}
+	count := 0
+	hasS0 := false
+	for i := 0; i < 64 && count < 8; i++ {
+		sy := int(p.oam[i*4]) + 1
+		if nextLine < sy || nextLine >= sy+spriteH {
+			continue
 		}
-		type sp struct{ idx, x, y, tile, attr int }
-		var sprs []sp
-		for i := 0; i < 64; i++ {
-			// OAM byte 0 stores "sprite top Y minus 1" — games write the
-			// desired Y coordinate minus 1 here, and hardware draws the
-			// sprite starting on the NEXT scanline.
+		p.secondaryOAM[count*4+0] = p.oam[i*4+0]
+		p.secondaryOAM[count*4+1] = p.oam[i*4+1]
+		p.secondaryOAM[count*4+2] = p.oam[i*4+2]
+		p.secondaryOAM[count*4+3] = p.oam[i*4+3]
+		if i == 0 {
+			hasS0 = true
+		}
+		count++
+	}
+	// Approximate sprite-overflow: set the flag if there are more than 8
+	// sprites on the next line. Real hardware has a specific buggy scan that
+	// can also set this falsely; we're going with the simpler version.
+	if count == 8 {
+		for i := 8; i < 64; i++ {
 			sy := int(p.oam[i*4]) + 1
-			if y < sy || y >= sy+spriteH {
-				continue
-			}
-			sprs = append(sprs, sp{
-				idx: i, y: sy,
-				tile: int(p.oam[i*4+1]),
-				attr: int(p.oam[i*4+2]),
-				x:    int(p.oam[i*4+3]),
-			})
-			if len(sprs) == 8 {
+			if nextLine >= sy && nextLine < sy+spriteH {
 				p.status |= statSprOv
 				break
 			}
 		}
-		for i := len(sprs) - 1; i >= 0; i-- {
-			s := sprs[i]
-			flipH := s.attr&0x40 != 0
-			flipV := s.attr&0x80 != 0
-			palSel := byte(s.attr & 0x03)
-			bgPri := s.attr&0x20 != 0
-			row := y - s.y
-			if flipV {
-				row = spriteH - 1 - row
-			}
-			var patBase uint16
-			var tileIdx int
-			if spriteH == 16 {
-				patBase = uint16(s.tile&1) * 0x1000
-				tileIdx = s.tile & 0xFE
-				if row >= 8 {
-					tileIdx++
-					row -= 8
-				}
-			} else {
-				if p.ctrl&ctrlSprPtable != 0 {
-					patBase = 0x1000
-				}
-				tileIdx = s.tile
-			}
-			lo := p.vramRead(patBase + uint16(tileIdx)*16 + uint16(row))
-			hi := p.vramRead(patBase + uint16(tileIdx)*16 + uint16(row) + 8)
-			for px := 0; px < 8; px++ {
-				sx := s.x + px
-				if sx < 0 || sx >= 256 {
-					continue
-				}
-				if sx < 8 && p.mask&maskLeftSpr == 0 {
-					continue
-				}
-				bit := byte(7 - px)
-				if flipH {
-					bit = byte(px)
-				}
-				c := ((lo >> bit) & 1) | (((hi >> bit) & 1) << 1)
-				if c == 0 {
-					continue
-				}
-				if s.idx == 0 && p.bgRow[sx].color&0x80 != 0 && p.mask&maskShowBg != 0 && sx != 255 {
-					p.status |= statSpr0
-				}
-				if bgPri && p.bgRow[sx].color&0x80 != 0 {
-					continue
-				}
-				palIdx := p.palette[0x10+palSel*4+c] & 0x3F
-				p.bgRow[sx] = bgPix{color: palIdx | 0x80}
-			}
-		}
 	}
-
-	base := y * 256
-	for px := 0; px < 256; px++ {
-		if p.bgRow[px].color&0x80 != 0 {
-			p.Frame[base+px] = nesPalette[p.bgRow[px].color&0x3F]
-		}
-	}
+	p.numSprites = count
+	p.nextHasS0 = hasS0
 }
 
-// renderScanline is the old single-call entry point, used by StepScanline for
-// non-hit scanlines where we don't need to split mid-way.
-func (p *PPU) renderScanline(y int) {
-	p.beginScanlineRender(y)
-	p.renderBGRange(0, 256)
-	p.endScanlineRender(y)
-}
-
-// predictSprite0Hit walks sprite 0 against the background for scanline y
-// and returns the first pixel where they both contain an opaque pixel
-// (which is the pixel that would set $2002 bit 6 on real hardware). Returns
-// -1 if no hit on this scanline.
-//
-// This lets StepFrame pre-set the flag at the correct mid-scanline cycle
-// instead of only at end-of-scanline, which is what caused the status-bar
-// jitter in Super Mario Bros: the coin animation shifts the hit scanline,
-// and without mid-scanline timing the split wanders by a whole scanline.
-func (p *PPU) predictSprite0Hit(y int) int {
-	if p.mask&maskShowBg == 0 || p.mask&maskShowSpr == 0 {
-		return -1
+// fetchSpriteTile loads the pattern bytes + attribute + X for one sprite
+// in secondaryOAM. Called once per sprite slot during cycles 257-320.
+// Crucially, these fetches drive A12 — their addresses depend on each
+// sprite's pattern table selection, which is what MMC3 scanline counter
+// is counting.
+func (p *PPU) fetchSpriteTile(slot int) {
+	if slot >= p.numSprites {
+		// Fetch dummy tile to maintain A12 timing (mirrors real hardware)
+		dummy := uint16(0x1FF0)
+		if p.ctrl&ctrlSprPtable == 0 && p.ctrl&ctrlSprSize == 0 {
+			dummy = 0x0FF0
+		}
+		p.vramRead(dummy)
+		p.vramRead(dummy + 8)
+		return
 	}
-	sy := int(p.oam[0]) + 1 // OAM Y is stored as actual Y minus 1
-	height := 8
+	sy := int(p.secondaryOAM[slot*4+0]) + 1
+	tile := p.secondaryOAM[slot*4+1]
+	attr := p.secondaryOAM[slot*4+2]
+	xPos := p.secondaryOAM[slot*4+3]
+
+	spriteH := 8
 	if p.ctrl&ctrlSprSize != 0 {
-		height = 16
+		spriteH = 16
 	}
-	if y < sy || y >= sy+height {
-		return -1
-	}
-	row := y - sy
-	tile := p.oam[1]
-	attr := p.oam[2]
-	x0 := int(p.oam[3])
-	flipH := attr&0x40 != 0
+	row := p.scanline + 1 - sy
 	flipV := attr&0x80 != 0
 	if flipV {
-		row = height - 1 - row
+		row = spriteH - 1 - row
 	}
-	var patBase uint16
-	var tileIdx int
-	if height == 16 {
-		patBase = uint16(tile&1) * 0x1000
-		tileIdx = int(tile & 0xFE)
+
+	var addr uint16
+	if spriteH == 16 {
+		base := uint16(tile&1) * 0x1000
+		tileIdx := uint16(tile & 0xFE)
 		if row >= 8 {
 			tileIdx++
 			row -= 8
 		}
+		addr = base + tileIdx*16 + uint16(row)
 	} else {
+		base := uint16(0)
 		if p.ctrl&ctrlSprPtable != 0 {
-			patBase = 0x1000
+			base = 0x1000
 		}
-		tileIdx = int(tile)
+		addr = base + uint16(tile)*16 + uint16(row)
 	}
-	sprLo := p.vramRead(patBase + uint16(tileIdx)*16 + uint16(row))
-	sprHi := p.vramRead(patBase + uint16(tileIdx)*16 + uint16(row) + 8)
-
-	for px := 0; px < 8; px++ {
-		sx := x0 + px
-		if sx >= 255 { // sprite 0 hit never fires on pixel 255
-			return -1
-		}
-		if sx < 0 {
-			continue
-		}
-		if sx < 8 && (p.mask&maskLeftSpr == 0 || p.mask&maskLeftBg == 0) {
-			continue
-		}
-		bit := byte(7 - px)
-		if flipH {
-			bit = byte(px)
-		}
-		sprC := ((sprLo >> bit) & 1) | (((sprHi >> bit) & 1) << 1)
-		if sprC == 0 {
-			continue
-		}
-		if p.bgOpaqueAt(sx) {
-			return sx
-		}
+	lo := p.vramRead(addr)
+	hi := p.vramRead(addr + 8)
+	// Horizontal flip: reverse bits
+	if attr&0x40 != 0 {
+		lo = reverseByte(lo)
+		hi = reverseByte(hi)
 	}
-	return -1
+	p.sprPatternLo[slot] = lo
+	p.sprPatternHi[slot] = hi
+	p.sprAttr[slot] = attr
+	p.sprX[slot] = xPos
 }
 
-// bgOpaqueAt returns whether the background pattern is opaque at screen X px,
-// assuming v is at the start of the scanline. Self-contained — snapshots
-// and restores v so callers can invoke it multiple times without state leak.
-func (p *PPU) bgOpaqueAt(px int) bool {
-	origV := p.v
-	defer func() { p.v = origV }()
-	for x := 0; x <= px; x++ {
-		fineX := (int(p.x) + x) & 7
-		if x > 0 && fineX == 0 {
-			p.incCoarseX()
-		}
-		if x != px {
-			continue
-		}
-		ntAddr := 0x2000 | (p.v & 0x0FFF)
-		tile := p.vramRead(ntAddr)
-		fineY := (p.v >> 12) & 7
-		ptBase := uint16(0)
-		if p.ctrl&ctrlBgPtable != 0 {
-			ptBase = 0x1000
-		}
-		lo := p.vramRead(ptBase + uint16(tile)*16 + fineY)
-		hi := p.vramRead(ptBase + uint16(tile)*16 + fineY + 8)
-		bit := byte(7 - fineX)
-		c := ((lo >> bit) & 1) | (((hi >> bit) & 1) << 1)
-		return c != 0
-	}
-	return false
+func reverseByte(b byte) byte {
+	b = (b&0xF0)>>4 | (b&0x0F)<<4
+	b = (b&0xCC)>>2 | (b&0x33)<<2
+	b = (b&0xAA)>>1 | (b&0x55)<<1
+	return b
 }
 
-// Step the PPU one scanline. Returns true if a frame was completed.
-func (p *PPU) StepScanline() bool {
-	// Pre-render
-	if p.scanline == 261 {
-		p.status &^= statVBlank | statSpr0 | statSprOv
-		if p.mask&maskRender != 0 {
-			// copyY happens on this scanline in real HW
-			p.copyY()
-			// Also copyX at cycle 257 conceptually
-			p.copyX()
+// --- Pixel output ---
+
+// outputPixel computes the final pixel at (cycle-1, scanline), combining BG
+// and sprite sources, and writes it to the frame buffer. Handles sprite-0
+// hit and sprite priority.
+func (p *PPU) outputPixel() {
+	x := p.cycle - 1
+	y := p.scanline
+
+	// Background pixel
+	var bgC, bgPal byte
+	if p.mask&maskShowBg != 0 && (x >= 8 || p.mask&maskLeftBg != 0) {
+		bit := uint16(0x8000) >> p.x
+		loBit := byte(0)
+		if p.bgShiftPatternLo&bit != 0 {
+			loBit = 1
 		}
-		p.scanline = 0
-		return false
-	}
-	// Visible
-	if p.scanline < 240 {
-		if p.mask&maskRender != 0 {
-			// Ensure v has correct initial state for this scanline:
-			// In real HW, copyX happens each scanline at cycle 257.
-			// We handle incY+copyX inside renderScanline.
+		hiBit := byte(0)
+		if p.bgShiftPatternHi&bit != 0 {
+			hiBit = 1
 		}
-		p.renderScanline(p.scanline)
-		p.scanline++
-		return false
+		bgC = loBit | (hiBit << 1)
+		if bgC != 0 {
+			paLo := byte(0)
+			if p.bgShiftAttribLo&bit != 0 {
+				paLo = 1
+			}
+			paHi := byte(0)
+			if p.bgShiftAttribHi&bit != 0 {
+				paHi = 1
+			}
+			bgPal = paLo | (paHi << 1)
+		}
 	}
-	// Post-render (240)
-	if p.scanline == 240 {
-		p.scanline++
-		return false
+
+	// Sprite pixel (first non-transparent sprite in order)
+	var sprC, sprPal, sprAttr byte
+	sprFound := false
+	sprSlot := -1
+	if p.mask&maskShowSpr != 0 && (x >= 8 || p.mask&maskLeftSpr != 0) {
+		for slot := 0; slot < p.numSprites; slot++ {
+			sx := int(p.sprX[slot])
+			dx := x - sx
+			if dx < 0 || dx > 7 {
+				continue
+			}
+			lo := (p.sprPatternLo[slot] >> (7 - dx)) & 1
+			hi := (p.sprPatternHi[slot] >> (7 - dx)) & 1
+			c := lo | (hi << 1)
+			if c == 0 {
+				continue
+			}
+			sprC = c
+			sprPal = p.sprAttr[slot] & 0x03
+			sprAttr = p.sprAttr[slot]
+			sprSlot = slot
+			sprFound = true
+			break
+		}
 	}
-	// Enter VBlank
-	if p.scanline == 241 {
+
+	// Combine — sprite-0 hit fires when both BG and sprite 0 have opaque
+	// pixels at the same position (with the usual exclusions).
+	var pal byte
+	if !sprFound && bgC == 0 {
+		// Universal background color
+		pal = p.palette[0] & 0x3F
+	} else if !sprFound {
+		pal = p.palette[bgPal*4+bgC] & 0x3F
+	} else if bgC == 0 {
+		pal = p.palette[0x10+sprPal*4+sprC] & 0x3F
+	} else {
+		if sprSlot == 0 && p.spriteHasS0 && x != 255 {
+			p.status |= statSpr0
+		}
+		if sprAttr&0x20 != 0 {
+			pal = p.palette[bgPal*4+bgC] & 0x3F
+		} else {
+			pal = p.palette[0x10+sprPal*4+sprC] & 0x3F
+		}
+	}
+
+	p.Frame[y*256+x] = nesPalette[pal]
+}
+
+// Step advances the PPU one cycle.
+func (p *PPU) Step() {
+	// Maintain A12 "low cycle" counter (used by the MMC3 filter)
+	if p.a12State {
+		p.a12LowCycles = 0
+	} else if p.a12LowCycles < 1<<30 {
+		p.a12LowCycles++
+	}
+
+	visible := p.scanline < 240
+	preRender := p.scanline == 261
+	renderLine := visible || preRender
+	renderingOn := p.mask&(maskShowBg|maskShowSpr) != 0
+
+	// VBlank start
+	if p.scanline == 241 && p.cycle == 1 {
 		p.status |= statVBlank
 		if p.ctrl&ctrlNmi != 0 {
 			p.NMIPending = true
 		}
-		p.scanline++
-		return false
 	}
-	// VBlank lines 242..260
-	if p.scanline < 261 {
-		p.scanline++
-		if p.scanline == 261 {
-			// Frame is done — next call starts pre-render
-			p.frame++
-			return true
+	// Pre-render cycle 1: clear status flags
+	if preRender && p.cycle == 1 {
+		p.status &^= statVBlank | statSpr0 | statSprOv
+	}
+
+	if renderLine && renderingOn {
+		// BG fetches and shifts during cycles 1..256 and 321..336
+		inFetch := (p.cycle >= 1 && p.cycle <= 256) || (p.cycle >= 321 && p.cycle <= 336)
+		if inFetch {
+			p.shiftBG()
+			switch (p.cycle - 1) & 7 {
+			case 0:
+				p.loadBGShifters()
+				p.fetchNT()
+			case 2:
+				p.fetchAT()
+			case 4:
+				p.fetchBGPatternLo()
+			case 6:
+				p.fetchBGPatternHi()
+			}
+			// incCoarseX at end of each tile (cycles 8, 16, ... 256, 328, 336)
+			if p.cycle == 256 {
+				p.incY()
+			} else if (p.cycle&7) == 0 && p.cycle != 0 {
+				p.incCoarseX()
+			}
+		}
+		// Copy horizontal bits at cycle 257
+		if p.cycle == 257 {
+			p.copyX()
+			// Reset oamAddr during sprite eval per hardware quirk
+			p.oamAddr = 0
+			// Finish sprite eval for next scanline (we do it in bulk here)
+			if visible {
+				p.evaluateSpritesForNextLine()
+			} else {
+				// Pre-render: prepare sprites for scanline 0
+				p.evaluateSpritesForNextLine()
+			}
+		}
+		// Copy vertical bits during pre-render 280..304
+		if preRender && p.cycle >= 280 && p.cycle <= 304 {
+			p.copyY()
+		}
+		// Sprite tile fetches during 257..320 — this is where MMC3 IRQ
+		// clocking happens in the real chip (A12 rising edges).
+		if p.cycle >= 257 && p.cycle <= 320 {
+			slot := (p.cycle - 257) / 8
+			cycleInSlot := (p.cycle - 257) & 7
+			if cycleInSlot == 5 {
+				// Handle both pattern fetches together — the A12 pattern
+				// from a pair of sprite fetches is what MMC3 counts on.
+				p.fetchSpriteTile(slot)
+			}
+		}
+		// Latch "has sprite 0" for the scanline we're about to start
+		// rendering (happens as sprite 0's sprite-0 flag gets carried
+		// through the fetch).
+		if p.cycle == 320 {
+			p.spriteHasS0 = p.nextHasS0
 		}
 	}
-	return false
+
+	// Pixel output on visible scanlines 0..239, cycles 1..256
+	if visible && renderingOn && p.cycle >= 1 && p.cycle <= 256 {
+		p.outputPixel()
+	} else if visible && !renderingOn && p.cycle >= 1 && p.cycle <= 256 {
+		// Rendering off: show universal background color (or palette when
+		// v addresses palette range — not modeled here).
+		p.Frame[p.scanline*256+p.cycle-1] = nesPalette[p.palette[0]&0x3F]
+	}
+
+	// Advance
+	p.cycle++
+	if p.cycle == 341 {
+		p.cycle = 0
+		p.scanline++
+		if p.scanline == 262 {
+			p.scanline = 0
+			p.frame++
+			p.odd = !p.odd
+		}
+	}
+}
+
+// FrameDone returns true once per frame, right after the last scanline
+// advances back to scanline 0.
+func (p *PPU) FrameDone() bool {
+	return p.scanline == 0 && p.cycle == 0
 }
 
 // OAM DMA — called by the bus when CPU writes $4014
