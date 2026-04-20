@@ -44,16 +44,18 @@ Real-game sanity checks pass: *Super Mario Bros.*, *Super Mario Bros. 3*, *The L
 
 Requires Go 1.22+ and a C toolchain (Ebiten audio uses cgo).
 
-```sh
-bash build.sh        # produces balrog.exe (Windows GUI subsystem)
+```cmd
+build.bat            :: from cmd or PowerShell
+bash build.sh        # from Git Bash / WSL / MSYS
 ```
 
-**Always use `build.sh` for releases.** It passes `-ldflags "-H=windowsgui"` so
-the exe launches without a console window. A plain `go build` defaults to the
-Console subsystem; `console_windows.go` has a `FreeConsole()` fallback that
-closes the console immediately at startup if one was attached, but the window
-still flashes visibly for the fraction of a second before the Go runtime
-initializes. For a clean launch, build with the ldflags.
+Both run `go build -ldflags "-H=windowsgui" -o balrog.exe .`. **Always build
+this way for anything you intend to launch from Explorer.** A plain `go build`
+defaults to the Console subsystem; `console_windows.go` has a `FreeConsole()`
+fallback that closes the console immediately at startup if one was attached,
+but the window still flashes visibly for the fraction of a second before the
+Go runtime initializes. With `-H=windowsgui` there's no console in the first
+place.
 
 ## Run
 

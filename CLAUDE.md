@@ -6,9 +6,14 @@ recurring gotchas appear.
 
 ## Build
 
-**Always use `bash build.sh`** for anything you'll run outside a terminal.
-It sets `-ldflags "-H=windowsgui"` which selects the Windows GUI subsystem
-so `balrog.exe` doesn't pop a console window when launched from Explorer.
+**Always build with `-ldflags "-H=windowsgui"`.** Two wrappers do this:
+
+- `bash build.sh` — works from the Bash tool (Git Bash on Windows).
+- `cmd //c ".\\build.bat"` — works from cmd.exe or PowerShell. Git Bash
+  can still shell into it with the explicit `.\` prefix shown.
+
+Both produce `balrog.exe` with the Windows GUI subsystem so Explorer
+launches don't pop a console window.
 
 A plain `go build -o balrog.exe .` works for quick dev iteration but:
 
@@ -16,7 +21,8 @@ A plain `go build -o balrog.exe .` works for quick dev iteration but:
 - `console_windows.go` calls `FreeConsole()` as a fallback, but the console
   still **flashes visibly** for a few hundred milliseconds before Go's
   runtime detaches. This is noticeable and annoying.
-- Never produce a release binary this way.
+- Never produce a release binary this way — and don't leave one in the
+  repo root either, because the user might double-click it.
 
 Verify subsystem on the built exe with PowerShell:
 
