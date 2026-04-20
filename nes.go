@@ -25,6 +25,7 @@ func NewNES(cart *Cart, sampleRate float64) *NES {
 	ppu := NewPPU(cart)
 	apu := NewAPU(sampleRate)
 	cpu := &CPU{}
+	ppu.cpu = cpu
 	bus := &NESBus{Cart: cart, PPU: ppu, APU: apu, CPU: cpu}
 	cpu.Bus = bus
 	apu.bus = bus

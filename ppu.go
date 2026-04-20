@@ -21,6 +21,7 @@ import (
 
 type PPU struct {
 	cart *Cart
+	cpu  *CPU // set by NewNES; used to cancel a pending NMI in the VBL race
 
 	// CPU-visible registers
 	ctrl    byte // $2000
@@ -213,16 +214,25 @@ func (p *PPU) CPURead(addr uint16) byte {
 	reg := addr & 7
 	switch reg {
 	case 2: // PPUSTATUS
-		// VBL/NMI suppression race. A $2002 read at the exact set cycle
-		// suppresses the flag entirely; reads 1–2 cycles later see the
-		// flag but kill the pending NMI.
+		// VBL/NMI suppression race (per nesdev):
+		//   - Read exactly at the cycle VBL would be set: flag reads 0,
+		//     the set is suppressed (never happens this frame), no NMI.
+		//   - Read 1–2 cycles after VBL was set: flag reads 1 but the
+		//     read clears it AND kills the NMI that was about to fire.
 		switch {
-		case p.scanline == 241 && p.cycle == 0:
-			// CPU reads right before the VBL set tick → suppress.
+		case p.scanline == 241 && p.cycle == 1:
+			// Read right at the VBL-set tick → suppress the set entirely.
 			p.vblSuppress = true
-		case p.scanline == 241 && (p.cycle == 1 || p.cycle == 2):
-			// Flag is already set; clear NMI propagation.
+			if p.cpu != nil {
+				p.cpu.ClearPendingNMI()
+			}
+		case p.scanline == 241 && (p.cycle == 2 || p.cycle == 3):
+			// Flag already set; read clears it and cancels the about-to-fire
+			// NMI.
 			p.NMIPending = false
+			if p.cpu != nil {
+				p.cpu.ClearPendingNMI()
+			}
 		}
 		r := (p.status & 0xE0) | (p.busLat & 0x1F)
 		p.status &^= statVBlank

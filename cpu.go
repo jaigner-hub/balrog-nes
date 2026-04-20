@@ -36,15 +36,15 @@ type CPU struct {
 	// with internal cycles tick explicitly.
 	tickFn func()
 
-	// IRQ (level) + NMI (edge) sampling. tickFn writes rawIRQ/rawNMI
-	// at the end of cycle T; the end of the same tick then latches them
-	// into irqPend/nmiPend, which are seen by Step at the start of the
-	// following instruction. Net delay from interrupt assertion to the
-	// interrupt sequence beginning: 1 cycle + the rest of the current
-	// instruction — matching real 6502's T-1 phi2 edge detector.
-	rawIRQ   bool
-	rawNMI   bool
-	nmiLatch bool
+	// IRQ (level) gets a 1-cycle latch. NMI (edge) gets 2 cycles of
+	// latch: raw → L1 → L2 → pend. The 2-cycle delay models the real
+	// 6502's edge detector + the CPU's internal polling phase and
+	// matches what blargg's ppu_vbl_nmi tests expect.
+	rawIRQ    bool
+	rawNMI    bool
+	irqLatch  bool
+	nmiLatch  bool
+	nmiLatch2 bool
 }
 
 func (c *CPU) tick() {
@@ -52,13 +52,17 @@ func (c *CPU) tick() {
 	if c.tickFn != nil {
 		c.tickFn()
 	}
-	// Sample lines at end of cycle T (phi2 of T). The CPU checks these
-	// between instructions.
-	c.irqPend = c.rawIRQ
-	if c.rawNMI {
+	// Latch interrupt lines with 1 cycle of delay (real-6502 edge
+	// detector). IRQ goes through irqLatch → irqPend; NMI (edge) goes
+	// through nmiLatch → nmiPend.
+	c.irqPend = c.irqLatch
+	c.irqLatch = c.rawIRQ
+	if c.nmiLatch2 {
 		c.nmiPend = true
-		c.rawNMI = false
 	}
+	c.nmiLatch2 = c.nmiLatch
+	c.nmiLatch = c.rawNMI
+	c.rawNMI = false
 }
 
 func (c *CPU) read(addr uint16) byte {
@@ -395,6 +399,17 @@ func (c *CPU) fetchOperand(mode amode) {
 }
 
 func (c *CPU) NMI() { c.nmiPend = true }
+
+// ClearPendingNMI cancels any not-yet-taken NMI, including both the
+// latches and the pending flag. Used by the PPU to model the VBL-read
+// race: a $2002 read within a 1–2 cycle window of VBL set reads the
+// flag as cleared AND suppresses the pending NMI for that frame.
+func (c *CPU) ClearPendingNMI() {
+	c.rawNMI = false
+	c.nmiLatch = false
+	c.nmiLatch2 = false
+	c.nmiPend = false
+}
 func (c *CPU) IRQ() { c.irqPend = true }
 
 func (c *CPU) doNMI() {

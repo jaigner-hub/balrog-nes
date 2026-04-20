@@ -34,7 +34,7 @@ Run against [blargg's NES test ROM suite](https://github.com/christopherpow/nes-
 | `instr_test-v5` (16 sub-tests)  | ✅ all pass |
 | `cpu_timing_test6`              | ✅ pass |
 | `sprite_hit_tests` (11 sub-tests) | ✅ all pass |
-| `ppu_vbl_nmi` (10 sub-tests)    | ⚠️ 9/10 (fails `02-vbl_set_time`) |
+| `ppu_vbl_nmi` (10 sub-tests)    | ⚠️ 6/10 (01/02/03/04/06/09 pass; 05/07/08/10 are cycle-exact NMI/odd-frame timing) |
 | `mmc3_test_2` (6 sub-tests)     | ⚠️ 4/6 (1/2/3/5 pass; 4 is cycle-exact IRQ timing, 6 tests the Rev A chip variant) |
 | `nestest.nes` automation (8990 instructions) | ✅ CPU trace matches reference `nestest.log` exactly (CPU + PPU position + CYC) |
 
