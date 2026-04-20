@@ -41,13 +41,15 @@ func NewNES(cart *Cart, sampleRate float64) *NES {
 	cpu.tickFn = func() {
 		n.APU.Step()
 		n.PPU.Step()
-		n.PPU.Step()
-		n.PPU.Step()
-		// NMI edge into the CPU's 1-cycle sampling pipeline.
+		// NMI is sampled early in the CPU cycle ("phi1" edge). An edge
+		// on the 1st PPU sub-cycle is visible to the latch this tick;
+		// edges on the 2nd/3rd sub-cycles defer to the next tick.
 		if n.PPU.NMIPending {
 			n.PPU.NMIPending = false
 			n.CPU.rawNMI = true
 		}
+		n.PPU.Step()
+		n.PPU.Step()
 		// IRQ is level-triggered. Reflect the live state; Step's 1-cycle
 		// latch models T-1 phi2 sampling.
 		irq := false

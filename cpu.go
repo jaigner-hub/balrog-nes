@@ -36,15 +36,14 @@ type CPU struct {
 	// with internal cycles tick explicitly.
 	tickFn func()
 
-	// IRQ (level) gets a 1-cycle latch. NMI (edge) gets 2 cycles of
-	// latch: raw → L1 → L2 → pend. The 2-cycle delay models the real
-	// 6502's edge detector + the CPU's internal polling phase and
-	// matches what blargg's ppu_vbl_nmi tests expect.
-	rawIRQ    bool
-	rawNMI    bool
-	irqLatch  bool
-	nmiLatch  bool
-	nmiLatch2 bool
+	// IRQ (level) and NMI (edge) both go through a 1-cycle latch to
+	// model the real-6502 edge detector + T-1 phi2 polling: a line
+	// state asserted during cycle T is sampled at the next instruction
+	// boundary, not the same one.
+	rawIRQ   bool
+	rawNMI   bool
+	irqLatch bool
+	nmiLatch bool
 }
 
 func (c *CPU) tick() {
@@ -57,10 +56,9 @@ func (c *CPU) tick() {
 	// through nmiLatch → nmiPend.
 	c.irqPend = c.irqLatch
 	c.irqLatch = c.rawIRQ
-	if c.nmiLatch2 {
+	if c.nmiLatch {
 		c.nmiPend = true
 	}
-	c.nmiLatch2 = c.nmiLatch
 	c.nmiLatch = c.rawNMI
 	c.rawNMI = false
 }
@@ -400,15 +398,21 @@ func (c *CPU) fetchOperand(mode amode) {
 
 func (c *CPU) NMI() { c.nmiPend = true }
 
-// ClearPendingNMI cancels any not-yet-taken NMI, including both the
-// latches and the pending flag. Used by the PPU to model the VBL-read
-// race: a $2002 read within a 1–2 cycle window of VBL set reads the
-// flag as cleared AND suppresses the pending NMI for that frame.
+// ClearPendingNMI cancels any not-yet-taken NMI. Clears every stage of
+// the edge detector — used by the $2002 read race where the entire NMI
+// sequence is aborted.
 func (c *CPU) ClearPendingNMI() {
 	c.rawNMI = false
 	c.nmiLatch = false
-	c.nmiLatch2 = false
 	c.nmiPend = false
+}
+
+// DeassertNMI releases the NMI line without canceling an NMI that has
+// already propagated past the edge detector. Used for $2000 NMI-enable
+// 1→0 writes: the raw line drops; if the CPU has already sampled it
+// (nmiPend set), the NMI still fires.
+func (c *CPU) DeassertNMI() {
+	c.rawNMI = false
 }
 func (c *CPU) IRQ() { c.irqPend = true }
 

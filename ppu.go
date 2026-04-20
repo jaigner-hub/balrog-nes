@@ -277,8 +277,18 @@ func (p *PPU) CPUWrite(addr uint16, val byte) {
 		oldNMI := p.ctrl&ctrlNmi != 0
 		p.ctrl = val
 		p.t = (p.t & 0xF3FF) | (uint16(val&0x03) << 10)
-		if !oldNMI && p.ctrl&ctrlNmi != 0 && p.status&statVBlank != 0 {
+		newNMI := p.ctrl&ctrlNmi != 0
+		// NMI-enable 0→1 while VBL flag is set fires an immediate NMI.
+		if !oldNMI && newNMI && p.status&statVBlank != 0 {
 			p.NMIPending = true
+		}
+		// NMI-enable 1→0 deasserts the NMI line. Early-stage latches drop
+		// the edge; already-sampled NMIs (nmiPend) still fire.
+		if oldNMI && !newNMI {
+			p.NMIPending = false
+			if p.cpu != nil {
+				p.cpu.DeassertNMI()
+			}
 		}
 	case 1:
 		p.mask = val
