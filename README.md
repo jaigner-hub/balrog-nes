@@ -63,15 +63,21 @@ You'll need your own legally-obtained NES ROMs; none are included.
 
 ## Controls
 
-### NES controller
+### NES controller (default bindings)
 
 | NES button | Keyboard           | Gamepad (Nintendo layout) | Gamepad (Xbox layout) |
 |------------|--------------------|---------------------------|-----------------------|
-| A          | <kbd>X</kbd>       | A or X                    | B or Y                |
-| B          | <kbd>Z</kbd>       | B or Y                    | A or X                |
+| A          | <kbd>X</kbd>       | A                         | B                     |
+| B          | <kbd>Z</kbd>       | B                         | A                     |
 | Select     | <kbd>R-Shift</kbd> | View / Back               | Back                  |
 | Start      | <kbd>Enter</kbd>   | Menu / Start              | Start                 |
 | D-pad      | Arrow keys         | D-pad or left stick       | D-pad or left stick   |
+
+All of these are rebindable — **Emulation → Configure Input...** opens a dialog
+where you can click any cell and press a new key or gamepad button. Bindings
+are saved to `balrog.cfg` (JSON, next to the exe) so they persist across runs.
+The left analog stick is always mapped to the D-pad on top of any custom
+gamepad bindings.
 
 ### Hotkeys
 

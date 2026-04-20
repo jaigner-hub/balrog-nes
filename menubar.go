@@ -68,6 +68,12 @@ func newMenuBar(g *Game) *menuBar {
 						}
 					}, enabled: hasNES},
 					{separator: true},
+					{label: "Configure Input...", action: func() {
+						if g.inputDialog != nil {
+							g.inputDialog.show()
+						}
+					}},
+					{separator: true},
 					{label: "Snap 4 frames", shortcut: "F11", action: func() {
 						if nes := g.nes(); nes != nil {
 							start := nes.PPU.FrameCount()
@@ -82,9 +88,6 @@ func newMenuBar(g *Game) *menuBar {
 			{
 				label: "Help",
 				items: []menuItem{
-					{label: "Controls", action: func() {
-						g.setStatus("X=A  Z=B  RShift=Select  Enter=Start  Arrows=D-pad", 5*time.Second)
-					}},
 					{label: "About", action: func() {
 						g.setStatus("balrog NES — written by Jeff Aigner (Go + Ebitengine)", 5*time.Second)
 					}},

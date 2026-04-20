@@ -65,7 +65,16 @@ type Game struct {
 	lastFrameCycles   uint64
 	traceCpuFrame     uint64
 
-	menuBar *menuBar
+	menuBar     *menuBar
+	inputCfg    *InputConfig
+	inputDialog *InputDialog
+
+	// --test-dialog: at the given frame, open the input config dialog
+	// and capture the whole window (menu bar + dialog overlay) to path.
+	// Purely for UI validation; not useful to end users.
+	testDialogAt   uint64
+	testDialogPath string
+	pendingWinSnap string // set by testDialog logic, consumed in Draw
 }
 
 // statePath returns the path of the save-state file for the current ROM.
@@ -101,60 +110,8 @@ func (g *Game) saveSnapshot(path string) {
 	log.Printf("snapshot saved to %s (frame %d)", path, g.frames)
 }
 
-func (g *Game) readGamepad() byte {
-	var b byte
-	ids := ebiten.AppendGamepadIDs(nil)
-	for _, id := range ids {
-		if ebiten.IsStandardGamepadLayoutAvailable(id) {
-			if ebiten.IsStandardGamepadButtonPressed(id, ebiten.StandardGamepadButtonRightRight) {
-				b |= 0x01
-			}
-			if ebiten.IsStandardGamepadButtonPressed(id, ebiten.StandardGamepadButtonRightBottom) {
-				b |= 0x02
-			}
-			if ebiten.IsStandardGamepadButtonPressed(id, ebiten.StandardGamepadButtonRightLeft) {
-				b |= 0x02
-			}
-			if ebiten.IsStandardGamepadButtonPressed(id, ebiten.StandardGamepadButtonRightTop) {
-				b |= 0x01
-			}
-			if ebiten.IsStandardGamepadButtonPressed(id, ebiten.StandardGamepadButtonCenterLeft) {
-				b |= 0x04
-			}
-			if ebiten.IsStandardGamepadButtonPressed(id, ebiten.StandardGamepadButtonCenterRight) {
-				b |= 0x08
-			}
-			if ebiten.IsStandardGamepadButtonPressed(id, ebiten.StandardGamepadButtonLeftTop) {
-				b |= 0x10
-			}
-			if ebiten.IsStandardGamepadButtonPressed(id, ebiten.StandardGamepadButtonLeftBottom) {
-				b |= 0x20
-			}
-			if ebiten.IsStandardGamepadButtonPressed(id, ebiten.StandardGamepadButtonLeftLeft) {
-				b |= 0x40
-			}
-			if ebiten.IsStandardGamepadButtonPressed(id, ebiten.StandardGamepadButtonLeftRight) {
-				b |= 0x80
-			}
-			ax := ebiten.StandardGamepadAxisValue(id, ebiten.StandardGamepadAxisLeftStickHorizontal)
-			ay := ebiten.StandardGamepadAxisValue(id, ebiten.StandardGamepadAxisLeftStickVertical)
-			const dead = 0.4
-			if ay < -dead {
-				b |= 0x10
-			}
-			if ay > dead {
-				b |= 0x20
-			}
-			if ax < -dead {
-				b |= 0x40
-			}
-			if ax > dead {
-				b |= 0x80
-			}
-		}
-	}
-	return b
-}
+// Controller reading moved to InputConfig.readController (input.go), which
+// consults user-editable bindings stored in balrog.cfg.
 
 // openROMDialog runs the native file picker on a goroutine and, on success,
 // installs the new NES instance via atomic swap. We don't block the UI thread.
@@ -299,6 +256,14 @@ func (g *Game) Update() error {
 		g.loadState()
 		g.autoLoadStateDone = true
 	}
+	// Input dialog is modal: when open, it consumes all input this frame
+	// so nothing leaks through to hotkeys, the menu, or the NES.
+	if g.inputDialog != nil {
+		sw, sh := ebiten.WindowSize()
+		if g.inputDialog.update(sw, sh) {
+			return nil
+		}
+	}
 	// Menu bar update — if it swallowed the click, skip gamepad/keyboard
 	// input for this frame so the user isn't accidentally feeding the NES
 	// while they're navigating menus.
@@ -355,32 +320,14 @@ func (g *Game) Update() error {
 		return nil
 	}
 
+	// Read live controller state from the user's bindings. Skip this
+	// entirely while the Configure Input dialog is capturing — otherwise
+	// the key the user just pressed to rebind would also be sent into the
+	// game on the same frame.
 	var b byte
-	if ebiten.IsKeyPressed(ebiten.KeyX) {
-		b |= 0x01
+	if g.inputDialog == nil || !g.inputDialog.isOpen() {
+		b = g.inputCfg.readController()
 	}
-	if ebiten.IsKeyPressed(ebiten.KeyZ) {
-		b |= 0x02
-	}
-	if ebiten.IsKeyPressed(ebiten.KeyShiftRight) {
-		b |= 0x04
-	}
-	if ebiten.IsKeyPressed(ebiten.KeyEnter) {
-		b |= 0x08
-	}
-	if ebiten.IsKeyPressed(ebiten.KeyArrowUp) {
-		b |= 0x10
-	}
-	if ebiten.IsKeyPressed(ebiten.KeyArrowDown) {
-		b |= 0x20
-	}
-	if ebiten.IsKeyPressed(ebiten.KeyArrowLeft) {
-		b |= 0x40
-	}
-	if ebiten.IsKeyPressed(ebiten.KeyArrowRight) {
-		b |= 0x80
-	}
-	b |= g.readGamepad()
 	for _, p := range g.presses {
 		if g.frames >= p.from && g.frames < p.to {
 			b |= p.button
@@ -409,6 +356,14 @@ func (g *Game) Update() error {
 		if g.frames == s.at {
 			g.saveSnapshot(s.path)
 		}
+	}
+	// --test-dialog: force the input dialog open and arm a full-window
+	// snapshot that Draw will write on the next render.
+	if g.testDialogAt > 0 && g.frames == g.testDialogAt {
+		if g.inputDialog != nil {
+			g.inputDialog.show()
+		}
+		g.pendingWinSnap = g.testDialogPath
 	}
 	if g.exitAt > 0 && g.frames >= g.exitAt {
 		time.Sleep(50 * time.Millisecond)
@@ -440,6 +395,33 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	if g.menuBar != nil {
 		g.menuBar.draw(screen)
 	}
+	// Input dialog draws on top of everything.
+	if g.inputDialog != nil {
+		g.inputDialog.draw(screen)
+	}
+	// Full-window snapshot captures the final composited screen (NES
+	// frame + menu bar + any overlay dialog). Used by --winsnap for
+	// debugging UI layout; also lets us pixel-diff the dialog.
+	if g.pendingWinSnap != "" {
+		g.savePNG(screen, g.pendingWinSnap)
+		g.pendingWinSnap = ""
+	}
+}
+
+// savePNG writes an *ebiten.Image to disk as PNG.
+func (g *Game) savePNG(src *ebiten.Image, path string) {
+	w := src.Bounds().Dx()
+	h := src.Bounds().Dy()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	src.ReadPixels(img.Pix)
+	f, err := os.Create(path)
+	if err != nil {
+		log.Printf("winsnap: %v", err)
+		return
+	}
+	defer f.Close()
+	png.Encode(f, img)
+	log.Printf("window snapshot saved to %s (frame %d)", path, g.frames)
 }
 
 func (g *Game) Layout(ow, oh int) (int, int) {
@@ -493,6 +475,8 @@ func main() {
 		screen: ebiten.NewImage(screenW, screenH),
 		pixels: make([]byte, screenW*screenH*4),
 	}
+	g.inputCfg = loadInputConfig()
+	g.inputDialog = newInputDialog(g.inputCfg)
 	g.menuBar = newMenuBar(g)
 	// Optional positional ROM arg
 	romArg := ""
@@ -550,6 +534,15 @@ func main() {
 				fmt.Sscanf(os.Args[i+1], "%d", &n)
 				g.exitAt = n
 				i++
+			}
+		case "--test-dialog":
+			// --test-dialog <frame> <path>: at the given frame, force the
+			// input config dialog open and capture the whole window (NES
+			// + menu + dialog) to <path>. Purely a dev aid.
+			if i+2 < len(os.Args) {
+				fmt.Sscanf(os.Args[i+1], "%d", &g.testDialogAt)
+				g.testDialogPath = os.Args[i+2]
+				i += 2
 			}
 		case "--load-state":
 			// Auto-load the ROM's savestate at startup. Pair with F2 once
