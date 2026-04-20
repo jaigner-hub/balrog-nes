@@ -46,7 +46,7 @@ $peoff = [System.BitConverter]::ToInt32($bytes, 0x3C)
 | `apu.go`                | 2A03 APU                                        |
 | `bus.go`                | Memory bus, controller I/O, OAM DMA             |
 | `cart.go`               | iNES loader, Mapper interface                  |
-| `mapper{0,1,2,3,4,7}.go` | Per-mapper code                                |
+| `mapper{0,1,2,3,4,7,11}.go` | Per-mapper code                             |
 | `state.go`              | Save-state serialization (gob), per-mapper blobs |
 | `nestest_trace.go`      | nestest automation driver for CPU validation   |
 

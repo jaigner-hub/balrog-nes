@@ -14,7 +14,7 @@ Working:
 - **Cycle-driven CPU–PPU interleaving** — every CPU bus access ticks the PPU 3 times and APU 1 time via a tick callback, so register writes land at the correct PPU cycle within each instruction. OAM DMA also ticks per cycle (513/514 cycles depending on CPU parity).
 - **PPU (2C02)** — cycle-accurate background + sprite rendering: 16-bit BG shift registers with correct attribute latch loading, sprite-0 hit, sprite overflow, 8×8 and 8×16 sprites, OAMDMA. NTSC odd-frame cycle skip so CPU/PPU stay phase-locked across frames.
 - **APU (2A03)** — pulse ×2 (envelope + sweep), triangle, noise, DMC (sample playback with IRQ). Approximation of the NES analog filter chain (90 Hz HP → 440 Hz HP → 14 kHz LP).
-- **Mappers** — NROM (0), MMC1 (1), UxROM (2), CNROM (3), MMC3 (4), AxROM (7). MMC3's scanline IRQ is clocked by real A12 rising edges (no cycle-count hack), with a 12-PPU-cycle low-time filter. SMB3's in-game status-bar boundary is stable; the title-screen scroll split still shows a 1-scanline offset versus Mesen that's tied to NMI sub-cycle timing we haven't yet fully matched.
+- **Mappers** — NROM (0), MMC1 (1), UxROM (2), CNROM (3), MMC3 (4), AxROM (7), Color Dreams (11). MMC3's scanline IRQ is clocked by real A12 rising edges (no cycle-count hack), with a 12-PPU-cycle low-time filter. SMB3's in-game status-bar boundary is stable; the title-screen scroll split still shows a 1-scanline offset versus Mesen that's tied to NMI sub-cycle timing we haven't yet fully matched.
 - **Input** — keyboard and standard gamepads (8BitDo, Xbox, DualShock — anything Ebiten recognizes).
 - **Frontend** — native file-open dialog, drag-and-drop ROM loading, reset, save states.
 
@@ -160,7 +160,7 @@ A handful of small Go programs under `tools/` help chase pixel-level bugs:
 | `apu.go`            | 2A03 APU (pulse, triangle, noise, DMC, filter chain)    |
 | `bus.go`            | Memory bus, controller registers, OAM DMA               |
 | `cart.go`           | iNES loader, mapper interface                           |
-| `mapper{0,1,2,3,4}.go` | Per-mapper code                                      |
+| `mapper{0,1,2,3,4,7,11}.go` | Per-mapper code                                 |
 | `state.go`          | Save state serialization (gob), per-mapper blobs        |
 | `nestest_trace.go`  | Nestest automation-mode driver (for CPU validation)     |
 

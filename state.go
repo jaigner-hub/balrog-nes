@@ -250,6 +250,23 @@ func (m *mapper3) restoreBlob(data []byte) error {
 	return nil
 }
 
+// mapper11 (Color Dreams): PRG + CHR bank registers.
+type mapper11Blob struct{ PrgBank, ChrBank int }
+
+func (m *mapper11) stateBlob() []byte {
+	var buf bytes.Buffer
+	gob.NewEncoder(&buf).Encode(mapper11Blob{PrgBank: m.prgBank, ChrBank: m.chrBank})
+	return buf.Bytes()
+}
+func (m *mapper11) restoreBlob(data []byte) error {
+	var b mapper11Blob
+	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&b); err != nil {
+		return err
+	}
+	m.prgBank, m.chrBank = b.PrgBank, b.ChrBank
+	return nil
+}
+
 // mapper4 (MMC3): bank registers, mode bits, mirroring, IRQ counter state,
 // and PRG-RAM.
 type mapper4Blob struct {
