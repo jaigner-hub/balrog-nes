@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -65,6 +66,8 @@ type Game struct {
 	lastFrameCycles   uint64
 	traceCpuFrame     uint64
 
+	stateSlot int // currently-active save state slot (0..numStateSlots-1)
+
 	menuBar     *menuBar
 	inputCfg    *InputConfig
 	inputDialog *InputDialog
@@ -77,15 +80,29 @@ type Game struct {
 	pendingWinSnap string // set by testDialog logic, consumed in Draw
 }
 
-// statePath returns the path of the save-state file for the current ROM.
-// e.g. "/games/mario.nes" -> "/games/mario.state".
-func (g *Game) statePath() string {
+// Number of save-state slots exposed to the user (0-9). Plenty for
+// Mario-style practice saves without turning the file picker into
+// a novel; the keyboard UI (F6/F7 to cycle) is still quick at 10.
+const numStateSlots = 10
+
+// statePathSlot returns the save-state file path for the current ROM
+// and the given slot. Slot 0 keeps the legacy "<rom>.state" name so
+// save states written by older balrog builds still load. Slots 1–9
+// use "<rom>.stateN".
+func (g *Game) statePathSlot(slot int) string {
 	if g.romPath == "" {
 		return ""
 	}
 	ext := filepath.Ext(g.romPath)
-	return g.romPath[:len(g.romPath)-len(ext)] + ".state"
+	base := g.romPath[:len(g.romPath)-len(ext)]
+	if slot == 0 {
+		return base + ".state"
+	}
+	return base + ".state" + strconv.Itoa(slot)
 }
+
+// statePath returns the path for the currently-active slot.
+func (g *Game) statePath() string { return g.statePathSlot(g.stateSlot) }
 
 func (g *Game) nes() *NES { return g.nesPtr.Load() }
 
@@ -147,7 +164,7 @@ func (g *Game) installCart(cart *Cart, name string) {
 	nes := NewNES(cart, float64(audioSampleRate))
 	g.nesPtr.Store(nes)
 	g.romName = name
-	ebiten.SetWindowTitle("balrog NES - " + name)
+	g.refreshWindowTitle()
 	g.frames = 0
 	g.setStatus(fmt.Sprintf("loaded %s (mapper %d)", name, cart.MapperID), 2*time.Second)
 	// Start audio on first ROM load. Holding off until now keeps the audio
@@ -224,7 +241,7 @@ func (g *Game) saveState() {
 		g.setStatus("save state: "+err.Error(), 4*time.Second)
 		return
 	}
-	g.setStatus("state saved -> "+filepath.Base(path), 2*time.Second)
+	g.setStatus(fmt.Sprintf("state saved to slot %d -> %s", g.stateSlot, filepath.Base(path)), 2*time.Second)
 }
 
 func (g *Game) loadState() {
@@ -247,8 +264,47 @@ func (g *Game) loadState() {
 		g.setStatus("restore: "+err.Error(), 4*time.Second)
 		return
 	}
-	g.setStatus("state loaded <- "+filepath.Base(path), 2*time.Second)
+	g.setStatus(fmt.Sprintf("state loaded from slot %d <- %s", g.stateSlot, filepath.Base(path)), 2*time.Second)
 }
+
+// setStateSlot updates the active save-state slot and tells the user
+// whether a save already exists there — so "F7 to slot 3, F4 load" is
+// obvious even before the load happens. Also folds the slot into the
+// window title when it's non-zero, so the feedback stays visible after
+// the status message fades.
+func (g *Game) setStateSlot(n int) {
+	if n < 0 {
+		n = numStateSlots - 1
+	}
+	if n >= numStateSlots {
+		n = 0
+	}
+	g.stateSlot = n
+	note := "(empty)"
+	if path := g.statePath(); path != "" {
+		if _, err := os.Stat(path); err == nil {
+			note = "(has save)"
+		}
+	}
+	g.setStatus(fmt.Sprintf("slot %d %s", g.stateSlot, note), 2*time.Second)
+	g.refreshWindowTitle()
+}
+
+// refreshWindowTitle rebuilds the OS window title from the current ROM
+// name and the active save-state slot.
+func (g *Game) refreshWindowTitle() {
+	t := "balrog NES"
+	if g.romName != "" {
+		t += " - " + g.romName
+	}
+	if g.stateSlot != 0 {
+		t += fmt.Sprintf(" [slot %d]", g.stateSlot)
+	}
+	ebiten.SetWindowTitle(t)
+}
+
+func (g *Game) nextStateSlot() { g.setStateSlot(g.stateSlot + 1) }
+func (g *Game) prevStateSlot() { g.setStateSlot(g.stateSlot - 1) }
 
 func (g *Game) Update() error {
 	// Auto-load savestate once, on the first Update after a ROM is loaded.
@@ -286,6 +342,12 @@ func (g *Game) Update() error {
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyF4) {
 		g.loadState()
+	}
+	if inpututil.IsKeyJustPressed(ebiten.KeyF6) {
+		g.prevStateSlot()
+	}
+	if inpututil.IsKeyJustPressed(ebiten.KeyF7) {
+		g.nextStateSlot()
 	}
 	// F11: capture next 4 frames as snap_<frame>_a/b/c/d.png — useful for
 	// diagnosing per-frame flicker in gameplay.

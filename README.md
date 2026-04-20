@@ -85,13 +85,19 @@ gamepad bindings.
 |---------------------------|--------------------------------------------|
 | <kbd>F1</kbd> / <kbd>Ctrl</kbd>+<kbd>O</kbd> | Open ROM (file dialog)      |
 | Drag `.nes` file onto window | Open ROM                                |
-| <kbd>F2</kbd>             | Save state                                 |
-| <kbd>F4</kbd>             | Load state                                 |
+| <kbd>F2</kbd>             | Save state (to current slot)               |
+| <kbd>F4</kbd>             | Load state (from current slot)             |
+| <kbd>F6</kbd>             | Previous save slot                         |
+| <kbd>F7</kbd>             | Next save slot                             |
 | <kbd>F5</kbd>             | Reset                                      |
 | <kbd>F11</kbd>            | Capture 4 sequential PNG frames (`snap_<frame>_{a,b,c,d}.png`) — useful for diagnosing per-frame flicker |
 | <kbd>F12</kbd>            | Dump IRQ + PPU register trace for the next frame to `irqlog.txt` |
 
-State files are written next to the ROM as `<rom-basename>.state`.
+10 save slots are available (0–9). Slot 0 is written as `<rom>.state`
+(backward-compatible with older balrog builds); slots 1–9 use
+`<rom>.state1` through `<rom>.state9`. The active slot appears in the
+window title when non-zero, and the status bar confirms each change
+(including whether that slot already has a save).
 
 ## CLI options
 

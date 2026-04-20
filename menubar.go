@@ -54,6 +54,8 @@ func newMenuBar(g *Game) *menuBar {
 					{separator: true},
 					{label: "Save State", shortcut: "F2", action: g.saveState, enabled: hasNES},
 					{label: "Load State", shortcut: "F4", action: g.loadState, enabled: hasNES},
+					{label: "Previous Slot", shortcut: "F6", action: g.prevStateSlot},
+					{label: "Next Slot", shortcut: "F7", action: g.nextStateSlot},
 					{separator: true},
 					{label: "Exit", action: func() { os.Exit(0) }},
 				},
