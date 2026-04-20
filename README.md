@@ -14,7 +14,7 @@ Working:
 - **Cycle-driven CPU–PPU interleaving** — every CPU bus access ticks the PPU 3 times and APU 1 time via a tick callback, so register writes land at the correct PPU cycle within each instruction. OAM DMA also ticks per cycle (513/514 cycles depending on CPU parity).
 - **PPU (2C02)** — cycle-accurate background + sprite rendering: 16-bit BG shift registers with correct attribute latch loading, sprite-0 hit, sprite overflow, 8×8 and 8×16 sprites, OAMDMA. NTSC odd-frame cycle skip so CPU/PPU stay phase-locked across frames.
 - **APU (2A03)** — pulse ×2 (envelope + sweep), triangle, noise, DMC (sample playback with IRQ). Approximation of the NES analog filter chain (90 Hz HP → 440 Hz HP → 14 kHz LP).
-- **Mappers** — NROM (0), MMC1 (1), UxROM (2), CNROM (3), MMC3 (4). MMC3's scanline IRQ is used by SMB3, Kirby's Adventure, Mega Man 3–6, and many others for status-bar splits; balrog gets the SMB3 title boundary and in-game status-bar split pixel-matched to Mesen with zero per-frame flicker.
+- **Mappers** — NROM (0), MMC1 (1), UxROM (2), CNROM (3), MMC3 (4). MMC3's scanline IRQ is used by SMB3, Kirby's Adventure, Mega Man 3–6, and many others for status-bar splits. balrog's SMB3 title scroll split is pixel-matched to Mesen, and the in-game status-bar boundary is cleaner than Mesen's: Mesen still exhibits a small couple-pixel per-frame flicker at that boundary on SMB3; balrog eliminates it entirely with the current MMC3 clock cycle tuning.
 - **Input** — keyboard and standard gamepads (8BitDo, Xbox, DualShock — anything Ebiten recognizes).
 - **Frontend** — native file-open dialog, drag-and-drop ROM loading, reset, save states.
 
@@ -127,7 +127,7 @@ A handful of small Go programs under `tools/` help chase pixel-level bugs:
 
 A few of the subtle timing-related decisions, for posterity:
 
-- **MMC3 scanline clock fires at PPU cycle 200** of each visible/pre-render line. The "real-hardware" A12 rising edge is closer to cycle 260, but with an atomic-instruction CPU emulator the ISR doesn't quite fit in HBlank at that timing. cy=200 gives the CPU enough runway that SMB3's title boundary and in-game status-bar split both render identically every frame, matching Mesen pixel-for-pixel.
+- **MMC3 scanline clock fires at PPU cycle 200** of each visible/pre-render line. The "real-hardware" A12 rising edge is closer to cycle 260, but with an atomic-instruction CPU emulator the ISR doesn't quite fit in HBlank at that timing. cy=200 gives the CPU enough runway that SMB3's title boundary and in-game status-bar split both render identically every frame — the title pixel-matches Mesen, and the in-game split is actually cleaner than Mesen's (Mesen still shows a small per-frame flicker at that boundary).
 - **IRQ is level-triggered** and sampled fresh each cycle. A 1-cycle latch pipeline models the T-1 phi2 sampling of real 6502: the line state as of the cycle before the last one is what decides whether the interrupt is taken at the next instruction boundary. This avoids spurious re-entry after `RTI` when the ISR has ACKed the mapper but the latch hadn't yet cleared.
 - **Odd-frame cycle skip** on the pre-render line when rendering is enabled, to keep CPU and PPU phase-aligned across the 89342/89341-cycle frame alternation.
 
