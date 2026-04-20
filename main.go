@@ -64,6 +64,8 @@ type Game struct {
 	cycPerFrame       bool
 	lastFrameCycles   uint64
 	traceCpuFrame     uint64
+
+	menuBar *menuBar
 }
 
 // statePath returns the path of the save-state file for the current ROM.
@@ -297,6 +299,12 @@ func (g *Game) Update() error {
 		g.loadState()
 		g.autoLoadStateDone = true
 	}
+	// Menu bar update — if it swallowed the click, skip gamepad/keyboard
+	// input for this frame so the user isn't accidentally feeding the NES
+	// while they're navigating menus.
+	if g.menuBar != nil {
+		g.menuBar.update(g)
+	}
 	// Hotkeys: F1 / Ctrl+O = open file dialog; F5 = reset
 	if inpututil.IsKeyJustPressed(ebiten.KeyF1) ||
 		(ebiten.IsKeyPressed(ebiten.KeyControl) && inpututil.IsKeyJustPressed(ebiten.KeyO)) {
@@ -410,24 +418,38 @@ func (g *Game) Update() error {
 }
 
 func (g *Game) Draw(screen *ebiten.Image) {
+	screen.Fill(color.RGBA{0, 0, 0, 0xFF})
+	sw, sh := screen.Bounds().Dx(), screen.Bounds().Dy()
+	nesAreaY := menuBarH
+	nesAreaH := sh - menuBarH
+	nesAreaW := sw
 	if g.nes() != nil {
 		op := &ebiten.DrawImageOptions{}
+		op.GeoM.Scale(float64(nesAreaW)/screenW, float64(nesAreaH)/screenH)
+		op.GeoM.Translate(0, float64(nesAreaY))
 		screen.DrawImage(g.screen, op)
 	} else {
-		// Placeholder when no ROM is loaded.
 		screen.Fill(color.RGBA{0x10, 0x10, 0x18, 0xFF})
-		ebitenutil.DebugPrintAt(screen, "balrog NES emulator", 8, 90)
-		ebitenutil.DebugPrintAt(screen, "Press F1 (or Ctrl+O) to open a ROM", 8, 110)
-		ebitenutil.DebugPrintAt(screen, "or drag a .nes file onto this window", 8, 122)
+		ebitenutil.DebugPrintAt(screen, "balrog NES emulator", 16, nesAreaY+90)
+		ebitenutil.DebugPrintAt(screen, "File > Open ROM… or drag a .nes here", 16, nesAreaY+110)
+		ebitenutil.DebugPrintAt(screen, "(or press F1)", 16, nesAreaY+122)
 	}
 	if time.Now().Before(g.statusUntil) {
-		ebitenutil.DebugPrintAt(screen, g.statusMsg, 4, screenH-12)
+		ebitenutil.DebugPrintAt(screen, g.statusMsg, 6, sh-16)
 	} else if g.nes() != nil {
-		ebitenutil.DebugPrintAt(screen, fmt.Sprintf("%.1f FPS", ebiten.ActualFPS()), 4, 4)
+		ebitenutil.DebugPrintAt(screen, fmt.Sprintf("%.1f FPS", ebiten.ActualFPS()), 6, nesAreaY+6)
+	}
+	if g.menuBar != nil {
+		g.menuBar.draw(screen)
 	}
 }
 
-func (g *Game) Layout(ow, oh int) (int, int) { return screenW, screenH }
+func (g *Game) Layout(ow, oh int) (int, int) {
+	// Match the outside window exactly — 1 logical pixel per device pixel
+	// so the menu bar's text renders at its natural size and the NES output
+	// fills whatever room is left (DrawImage handles the scaling).
+	return ow, oh
+}
 
 // apuReader pulls samples from whatever NES instance is currently loaded.
 // Returns silence when no ROM is loaded or the buffer underflows.
@@ -473,6 +495,7 @@ func main() {
 		screen: ebiten.NewImage(screenW, screenH),
 		pixels: make([]byte, screenW*screenH*4),
 	}
+	g.menuBar = newMenuBar(g)
 	// Optional positional ROM arg
 	romArg := ""
 	if len(os.Args) >= 2 && len(os.Args[1]) > 0 && os.Args[1][0] != '-' {
@@ -568,7 +591,7 @@ func main() {
 		}
 	}
 
-	ebiten.SetWindowSize(screenW*scale, screenH*scale)
+	ebiten.SetWindowSize(screenW*scale, screenH*scale+menuBarH)
 	if g.romName == "" {
 		ebiten.SetWindowTitle("balrog NES")
 	}
