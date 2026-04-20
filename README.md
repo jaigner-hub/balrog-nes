@@ -62,7 +62,14 @@ place.
 ```sh
 ./balrog.exe                  # open with no ROM; pick via the GUI
 ./balrog.exe path/to/rom.nes  # load directly
+./balrog.exe path/to/rom.zip  # zip archives work too — first .nes inside is loaded
 ```
+
+ROMs are accepted as raw `.nes` files, or inside a `.zip` archive (common
+distribution format). For zips, the first `.nes` entry is loaded and other
+files — READMEs, cover art, etc. — are ignored. Save-state files are written
+next to the archive (`<rom>.zip` → `<rom>.state`), so archived and unarchived
+ROMs share the same save slot namespace.
 
 You'll need your own legally-obtained NES ROMs; none are included.
 

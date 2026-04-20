@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -138,7 +139,10 @@ func (g *Game) openROMDialog() {
 	}
 	go func() {
 		defer g.loading.Store(false)
-		path, err := dialog.File().Filter("NES ROM", "nes").Title("Open ROM").Load()
+		path, err := dialog.File().
+			Filter("NES ROM", "nes", "zip").
+			Title("Open ROM").
+			Load()
 		if err != nil {
 			// dialog.ErrCancelled is normal — user closed the picker
 			if err.Error() != "Cancelled" {
@@ -181,19 +185,24 @@ func (g *Game) installCart(cart *Cart, name string) {
 // Name() method returns the real absolute path. We grab that so save states
 // can write next to the ROM (same as when it's opened via CLI or dialog).
 func (g *Game) loadDroppedROM(files fs.FS) {
+	// Pick the first .nes or .zip file in the drop. Zips are cracked
+	// open the same way as when opened via the file dialog / CLI —
+	// LoadCart sniffs the PKZIP signature and finds the first .nes
+	// entry inside.
 	var picked string
 	_ = fs.WalkDir(files, ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return nil
 		}
-		if filepath.Ext(p) == ".nes" {
+		ext := strings.ToLower(filepath.Ext(p))
+		if ext == ".nes" || ext == ".zip" {
 			picked = p
 			return fs.SkipAll
 		}
 		return nil
 	})
 	if picked == "" {
-		g.setStatus("no .nes file in drop", 3*time.Second)
+		g.setStatus("no .nes or .zip file in drop", 3*time.Second)
 		return
 	}
 	f, err := files.Open(picked)
@@ -212,7 +221,15 @@ func (g *Game) loadDroppedROM(files fs.FS) {
 		g.setStatus("read dropped: "+err.Error(), 3*time.Second)
 		return
 	}
-	cart, err := LoadCartBytes(data)
+	// LoadCartBytes handles raw iNES; isZipData+loadCartFromZipBytes
+	// handles zipped. Picking the right one here keeps the drop path
+	// symmetric with loadROM().
+	var cart *Cart
+	if isZipData(data) {
+		cart, err = loadCartFromZipBytes(data)
+	} else {
+		cart, err = LoadCartBytes(data)
+	}
 	if err != nil {
 		g.setStatus("load failed: "+err.Error(), 4*time.Second)
 		return

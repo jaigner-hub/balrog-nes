@@ -1,9 +1,13 @@
 package main
 
 import (
+	"archive/zip"
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"strings"
 )
 
 type Mirroring int
@@ -38,7 +42,59 @@ func LoadCart(path string) (*Cart, error) {
 	if err != nil {
 		return nil, err
 	}
+	// If the file is a zip archive (either named .zip or we see the
+	// local-file signature at offset 0), crack it open and look for
+	// the first .nes entry inside. Common NES ROM distribution format.
+	if isZipData(data) {
+		return loadCartFromZipBytes(data)
+	}
 	return LoadCartBytes(data)
+}
+
+// isZipData checks the 4-byte PKZIP local-file-header signature ("PK\x03\x04").
+// We look at the bytes rather than the filename so "rom.zip" and "rom.zip.bak"
+// both work, and a misnamed archive still loads.
+func isZipData(data []byte) bool {
+	return len(data) >= 4 && data[0] == 'P' && data[1] == 'K' && data[2] == 0x03 && data[3] == 0x04
+}
+
+// loadCartFromZipBytes opens zip-archived data in memory, finds the first
+// entry with a .nes extension (case-insensitive), and parses it as an
+// iNES cart. Returns a descriptive error if the archive has no .nes file.
+func loadCartFromZipBytes(data []byte) (*Cart, error) {
+	r, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return nil, fmt.Errorf("zip: %w", err)
+	}
+	for _, f := range r.File {
+		if f.FileInfo().IsDir() {
+			continue
+		}
+		if !strings.EqualFold(extLower(f.Name), ".nes") {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return nil, fmt.Errorf("zip entry %q: %w", f.Name, err)
+		}
+		romData, err := io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			return nil, fmt.Errorf("zip entry %q: %w", f.Name, err)
+		}
+		return LoadCartBytes(romData)
+	}
+	return nil, errors.New("no .nes file found in archive")
+}
+
+// extLower returns the lowercased extension of a filename (including the
+// leading dot). Different from path/filepath.Ext in that it handles zip
+// entries that use forward slashes even on Windows.
+func extLower(name string) string {
+	if i := strings.LastIndex(name, "."); i >= 0 {
+		return strings.ToLower(name[i:])
+	}
+	return ""
 }
 
 func LoadCartBytes(data []byte) (*Cart, error) {
