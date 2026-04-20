@@ -212,6 +212,27 @@ func (m *mapper2) restoreBlob(data []byte) error {
 	return nil
 }
 
+// mapper7 (AxROM): PRG bank + mirror-select (bit 4).
+type mapper7Blob struct {
+	Bank   byte
+	Mirror int
+}
+
+func (m *mapper7) stateBlob() []byte {
+	var buf bytes.Buffer
+	gob.NewEncoder(&buf).Encode(mapper7Blob{Bank: m.bank, Mirror: int(m.mirror)})
+	return buf.Bytes()
+}
+func (m *mapper7) restoreBlob(data []byte) error {
+	var b mapper7Blob
+	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&b); err != nil {
+		return err
+	}
+	m.bank = b.Bank
+	m.mirror = Mirroring(b.Mirror)
+	return nil
+}
+
 // mapper3 (CNROM): CHR bank register.
 type mapper3Blob struct{ ChrBank int }
 

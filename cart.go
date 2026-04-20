@@ -99,6 +99,8 @@ func LoadCartBytes(data []byte) (*Cart, error) {
 		c.mapper = newMapper3(c)
 	case 4:
 		c.mapper = newMapper4(c)
+	case 7:
+		c.mapper = newMapper7(c)
 	default:
 		return nil, fmt.Errorf("unsupported mapper %d", mapperID)
 	}
