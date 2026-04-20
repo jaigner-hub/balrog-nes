@@ -46,11 +46,14 @@ Requires Go 1.22+ and a C toolchain (Ebiten audio uses cgo).
 
 ```sh
 bash build.sh        # produces balrog.exe (Windows GUI subsystem)
-# or:
-go build -o balrog.exe .
 ```
 
-`build.sh` passes `-ldflags "-H=windowsgui"` so double-clicking the exe doesn't pop a console.
+**Always use `build.sh` for releases.** It passes `-ldflags "-H=windowsgui"` so
+the exe launches without a console window. A plain `go build` defaults to the
+Console subsystem; `console_windows.go` has a `FreeConsole()` fallback that
+closes the console immediately at startup if one was attached, but the window
+still flashes visibly for the fraction of a second before the Go runtime
+initializes. For a clean launch, build with the ldflags.
 
 ## Run
 

@@ -23,9 +23,13 @@ balrog
 *.log
 irqlog.txt
 
-# Save states (future)
+# Save states
 *.state
+*.state[0-9]
 *.sav
+
+# User input bindings (written next to the exe on first configure)
+balrog.cfg
 
 # OS / editor
 .DS_Store
