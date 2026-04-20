@@ -764,9 +764,11 @@ func (p *PPU) Step() {
 
 	// Advance. NTSC odd-frame cycle skip: on odd frames with BG rendering
 	// enabled, the pre-render scanline is 340 cycles instead of 341 — the
-	// cycle that would have been cy=340 is skipped. We handle that by
-	// jumping straight to sc=0 cy=0 at the end of cy=339. (blargg's
-	// 10-even_odd_timing test is sensitive to this cycle being correct.)
+	// cycle that would have been cy=340 is skipped. We jump from cy=339
+	// straight to sc=0 cy=0 on the frame boundary. PPUMASK is sampled at
+	// cy=339 per NESdev wiki. blargg's 10-even_odd_timing tests 2 and 4
+	// pass; tests 3 and 5 probe a 1-PPU-cycle offset that our CPU-write
+	// to PPU timing doesn't quite match.
 	if preRender && p.cycle == 339 && p.odd && p.mask&maskShowBg != 0 {
 		p.cycle = 0
 		p.scanline = 0
