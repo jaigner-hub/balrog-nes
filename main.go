@@ -436,8 +436,6 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	}
 	if time.Now().Before(g.statusUntil) {
 		ebitenutil.DebugPrintAt(screen, g.statusMsg, 6, sh-16)
-	} else if g.nes() != nil {
-		ebitenutil.DebugPrintAt(screen, fmt.Sprintf("%.1f FPS", ebiten.ActualFPS()), 6, nesAreaY+6)
 	}
 	if g.menuBar != nil {
 		g.menuBar.draw(screen)
