@@ -55,8 +55,12 @@ const unbound = -1
 // Multiple NES buttons could bind to the same key, but the normal case is
 // one-to-one and the dialog doesn't prevent duplicates (NES games don't
 // care if both Up and W fire the Up bit, for instance).
+//
+// CRTFilter is stored here too so we only have one config file (balrog.cfg)
+// — the name is a holdover from when this was input-only.
 type InputConfig struct {
-	Bindings map[string]buttonBinding `json:"bindings"`
+	Bindings  map[string]buttonBinding `json:"bindings"`
+	CRTFilter bool                     `json:"crt_filter,omitempty"`
 }
 
 // bitKey converts a byte bit (0x01, 0x02, ...) into the JSON key used to

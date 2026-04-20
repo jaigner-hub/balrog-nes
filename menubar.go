@@ -70,6 +70,7 @@ func newMenuBar(g *Game) *menuBar {
 						}
 					}, enabled: hasNES},
 					{separator: true},
+					{label: "Toggle CRT Filter", shortcut: "F3", action: g.toggleCRT},
 					{label: "Configure Input...", action: func() {
 						if g.inputDialog != nil {
 							g.inputDialog.show()

@@ -73,12 +73,20 @@ type Game struct {
 	inputCfg    *InputConfig
 	inputDialog *InputDialog
 
+	crtShader *ebiten.Shader // compiled CRT filter; nil if compilation failed
+
 	// --test-dialog: at the given frame, open the input config dialog
 	// and capture the whole window (menu bar + dialog overlay) to path.
 	// Purely for UI validation; not useful to end users.
 	testDialogAt   uint64
 	testDialogPath string
-	pendingWinSnap string // set by testDialog logic, consumed in Draw
+	// --winsnap <frame> <path>: like --snap but saves the FULL composited
+	// screen (NES area + menu bar + any active shader/overlay) rather
+	// than the raw PPU frame. Useful for verifying the CRT filter or
+	// menu rendering without having to screenshot the real window.
+	winSnapAt   uint64
+	winSnapPath string
+	pendingWinSnap string // set by testDialog/winSnap logic, consumed in Draw
 }
 
 // Number of save-state slots exposed to the user (0-9). Plenty for
@@ -323,6 +331,23 @@ func (g *Game) refreshWindowTitle() {
 func (g *Game) nextStateSlot() { g.setStateSlot(g.stateSlot + 1) }
 func (g *Game) prevStateSlot() { g.setStateSlot(g.stateSlot - 1) }
 
+// toggleCRT flips the CRT filter on/off and persists the choice.
+// If the shader failed to compile at startup, the toggle is a no-op
+// other than telling the user nothing can be done.
+func (g *Game) toggleCRT() {
+	if g.crtShader == nil {
+		g.setStatus("CRT filter unavailable (shader failed to compile)", 3*time.Second)
+		return
+	}
+	g.inputCfg.CRTFilter = !g.inputCfg.CRTFilter
+	_ = g.inputCfg.save()
+	if g.inputCfg.CRTFilter {
+		g.setStatus("CRT filter: on", 2*time.Second)
+	} else {
+		g.setStatus("CRT filter: off", 2*time.Second)
+	}
+}
+
 func (g *Game) Update() error {
 	// Auto-load savestate once, on the first Update after a ROM is loaded.
 	if g.autoLoadState && !g.autoLoadStateDone && g.nes() != nil {
@@ -365,6 +390,9 @@ func (g *Game) Update() error {
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyF7) {
 		g.nextStateSlot()
+	}
+	if inpututil.IsKeyJustPressed(ebiten.KeyF3) {
+		g.toggleCRT()
 	}
 	// F11: capture next 4 frames as snap_<frame>_a/b/c/d.png — useful for
 	// diagnosing per-frame flicker in gameplay.
@@ -444,6 +472,10 @@ func (g *Game) Update() error {
 		}
 		g.pendingWinSnap = g.testDialogPath
 	}
+	// --winsnap: arm a full-window snapshot without any UI overlay.
+	if g.winSnapAt > 0 && g.frames == g.winSnapAt {
+		g.pendingWinSnap = g.winSnapPath
+	}
 	if g.exitAt > 0 && g.frames >= g.exitAt {
 		time.Sleep(50 * time.Millisecond)
 		os.Exit(0)
@@ -458,10 +490,22 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	nesAreaH := sh - menuBarH
 	nesAreaW := sw
 	if g.nes() != nil {
-		op := &ebiten.DrawImageOptions{}
-		op.GeoM.Scale(float64(nesAreaW)/screenW, float64(nesAreaH)/screenH)
-		op.GeoM.Translate(0, float64(nesAreaY))
-		screen.DrawImage(g.screen, op)
+		if g.crtShader != nil && g.inputCfg != nil && g.inputCfg.CRTFilter {
+			// Shader path: scanlines + phosphor mask applied to the
+			// scaled NES output. DrawRectShader takes the DESTINATION
+			// rect size before GeoM; GeoM then scales/translates that
+			// rect onto the screen.
+			op := &ebiten.DrawRectShaderOptions{}
+			op.Images[0] = g.screen
+			op.GeoM.Scale(float64(nesAreaW)/screenW, float64(nesAreaH)/screenH)
+			op.GeoM.Translate(0, float64(nesAreaY))
+			screen.DrawRectShader(screenW, screenH, g.crtShader, op)
+		} else {
+			op := &ebiten.DrawImageOptions{}
+			op.GeoM.Scale(float64(nesAreaW)/screenW, float64(nesAreaH)/screenH)
+			op.GeoM.Translate(0, float64(nesAreaY))
+			screen.DrawImage(g.screen, op)
+		}
 	} else {
 		screen.Fill(color.RGBA{0x10, 0x10, 0x18, 0xFF})
 		ebitenutil.DebugPrintAt(screen, "balrog NES emulator", 16, nesAreaY+90)
@@ -556,6 +600,12 @@ func main() {
 	}
 	g.inputCfg = loadInputConfig()
 	g.inputDialog = newInputDialog(g.inputCfg)
+	g.crtShader = makeCRTShader()
+	if g.crtShader == nil {
+		log.Printf("CRT shader failed to compile; filter disabled")
+	} else {
+		log.Printf("CRT shader loaded, filter=%v", g.inputCfg.CRTFilter)
+	}
 	g.menuBar = newMenuBar(g)
 	// Optional positional ROM arg
 	romArg := ""
@@ -621,6 +671,15 @@ func main() {
 			if i+2 < len(os.Args) {
 				fmt.Sscanf(os.Args[i+1], "%d", &g.testDialogAt)
 				g.testDialogPath = os.Args[i+2]
+				i += 2
+			}
+		case "--winsnap":
+			// --winsnap <frame> <path>: capture the full composited
+			// screen (with CRT filter, menu bar, etc.) to <path>. Unlike
+			// --snap which saves only the raw 256x240 PPU frame.
+			if i+2 < len(os.Args) {
+				fmt.Sscanf(os.Args[i+1], "%d", &g.winSnapAt)
+				g.winSnapPath = os.Args[i+2]
 				i += 2
 			}
 		case "--load-state":

@@ -1,0 +1,44 @@
+//kage:unit pixels
+
+package main
+
+// CRT filter for balrog's NES output.
+//
+// dstPos.xy → fragment coordinate in the destination image (output pixels)
+// srcPos.xy → coordinate in the source NES image (0..256, 0..240)
+
+func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
+	c := imageSrc0UnsafeAt(srcPos)
+
+	// Scanlines: dim every other destination row. Gives visible dark
+	// horizontal bands at the output resolution — the classic "CRT
+	// beam gap" look. Period 2 in output pixels so it scales with
+	// whatever window size the user has.
+	rowParity := mod(floor(dstPos.y), 2.0)
+	// 0.72 on dim rows, 1.0 on bright rows.
+	scanline := 0.72 + 0.28*rowParity
+	c.rgb *= scanline
+
+	// Phosphor RGB mask: each triad of output columns tints R, G, B
+	// slightly, simulating an aperture-grille subpixel pattern.
+	// 0 → R dominant, 1 → G dominant, 2 → B dominant.
+	col := mod(floor(dstPos.x), 3.0)
+	// Each step() here is 1.0 when col is that index and 0 otherwise.
+	isR := step(-0.5, col) * step(col, 0.5)
+	isG := step(0.5, col) * step(col, 1.5)
+	isB := step(1.5, col) * step(col, 2.5)
+	// Non-lit channels dim to 0.82; lit channel stays at 1.0.
+	r := c.r * (isR + (1.0-isR)*0.82)
+	g := c.g * (isG + (1.0-isG)*0.82)
+	b := c.b * (isB + (1.0-isB)*0.82)
+	c.r = r
+	c.g = g
+	c.b = b
+
+	// Brightness compensation — the mask + scanlines darken the
+	// picture on average; bump luma back up so blacks stay black but
+	// everything else matches the non-CRT brightness.
+	c.rgb *= 1.35
+
+	return c
+}
