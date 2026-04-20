@@ -1,5 +1,7 @@
 package main
 
+import "fmt"
+
 type Controller struct {
 	Buttons byte // A B Select Start Up Down Left Right (bit0 = A)
 	shift   byte
@@ -56,17 +58,18 @@ func (b *NESBus) Write(addr uint16, v byte) {
 	case addr < 0x4000:
 		b.PPU.CPUWrite(addr&0x2007, v)
 	case addr == 0x4014:
-		// OAM DMA: copy 256 bytes from $XX00-$XXFF to OAM
-		page := make([]byte, 256)
+		// OAM DMA: copy 256 bytes from $XX00-$XXFF to OAM, ticking each
+		// cycle so PPU/APU advance in lockstep (513 or 514 CPU cycles).
 		base := uint16(v) << 8
-		for i := 0; i < 256; i++ {
-			page[i] = b.Read(base + uint16(i))
-		}
-		b.PPU.OAMDMA(page)
-		// DMA takes 513 or 514 CPU cycles
-		b.CPU.stall += 513
+		b.CPU.tick() // T0: dummy halt cycle
 		if b.CPU.cycles&1 != 0 {
-			b.CPU.stall++
+			b.CPU.tick() // T1: extra alignment cycle on odd
+		}
+		for i := 0; i < 256; i++ {
+			src := b.Read(base + uint16(i))
+			b.CPU.tick() // read tick
+			b.PPU.oam[(uint16(b.PPU.oamAddr)+uint16(i))&0xFF] = src
+			b.CPU.tick() // write tick
 		}
 	case addr == 0x4016:
 		b.Ctrl[0].Write(v)
@@ -74,6 +77,9 @@ func (b *NESBus) Write(addr uint16, v byte) {
 	case (addr >= 0x4000 && addr <= 0x4013) || addr == 0x4015 || addr == 0x4017:
 		b.APU.CPUWrite(addr, v)
 	case addr >= 0x4020:
+		if debugIrqLog && b.PPU.frame == debugIrqFrame && addr >= 0xC000 && debugIrqLogFile != nil {
+			debugIrqLogFile.WriteString(fmt.Sprintf("  [sc=%d cy=%d] MMC3 $%04X <- $%02X\n", b.PPU.scanline, b.PPU.cycle, addr, v))
+		}
 		b.Cart.WritePRG(addr, v)
 	}
 }

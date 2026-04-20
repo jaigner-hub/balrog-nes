@@ -18,6 +18,10 @@ balrog
 # Snapshots / debug captures
 *.png
 
+# Runtime diagnostic logs
+*.log
+irqlog.txt
+
 # Save states (future)
 *.state
 *.sav

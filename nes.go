@@ -34,6 +34,31 @@ func NewNES(cart *Cart, sampleRate float64) *NES {
 	if irq, ok := cart.mapper.(irqMapper); ok {
 		n.irqMapper = irq
 	}
+	// Wire CPU tick → step APU once and PPU 3x. Each CPU bus access (and
+	// internal cycles) triggers one tick, so register writes land at the
+	// correct PPU cycle within each instruction.
+	cpu.tickFn = func() {
+		n.APU.Step()
+		n.PPU.Step()
+		n.PPU.Step()
+		n.PPU.Step()
+		// Sample interrupt lines this cycle. NMI is edge-triggered so we
+		// latch it on the rising edge. IRQ is level-triggered — track the
+		// live line state each cycle; `Step` decides when to actually take
+		// the interrupt based on instruction-cycle position (T-1 phi2).
+		if n.PPU.NMIPending {
+			n.PPU.NMIPending = false
+			n.CPU.rawNMI = true
+		}
+		irq := false
+		if n.APU.DMC.irqPending {
+			irq = true
+		}
+		if n.irqMapper != nil && n.irqMapper.IRQPending() {
+			irq = true
+		}
+		n.CPU.rawIRQ = irq
+	}
 	return n
 }
 
@@ -54,25 +79,11 @@ func (n *NES) StepFrame() {
 		}
 	}
 	for n.PPU.frame == startFrame {
-		before := n.CPU.cycles
+		// CPU.Step internally ticks PPU/APU per cycle via tickFn (set in
+		// NewNES). NMI/IRQ pending flags are sampled inside tickFn each
+		// cycle, so a pending interrupt is taken at the next instruction
+		// boundary without another loop check here.
 		n.CPU.Step()
-		delta := int(n.CPU.cycles - before)
-		for i := 0; i < delta; i++ {
-			n.APU.Step()
-			n.PPU.Step()
-			n.PPU.Step()
-			n.PPU.Step()
-		}
-		if n.PPU.NMIPending {
-			n.PPU.NMIPending = false
-			n.CPU.NMI()
-		}
-		if n.APU.DMC.irqPending {
-			n.CPU.IRQ()
-		}
-		if n.irqMapper != nil && n.irqMapper.IRQPending() {
-			n.CPU.IRQ()
-		}
 	}
 	if debugMapper4 {
 		if m, ok := n.Bus.Cart.mapper.(*mapper4); ok {

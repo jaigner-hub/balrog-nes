@@ -29,6 +29,55 @@ type CPU struct {
 	addrMode  amode
 	operand   uint16
 	pageCross bool
+
+	// Called once per CPU cycle. Owner uses this to advance PPU/APU in
+	// lockstep so that bus accesses appear at the correct PPU cycle within
+	// each instruction. Each bus access (read or write) ticks once; opcodes
+	// with internal cycles tick explicitly.
+	tickFn func()
+
+	// IRQ/NMI sampling — real 6502 samples the interrupt lines at phi2 of
+	// the penultimate cycle (T-1) of each instruction, not at the final
+	// cycle. If asserted at T-1, the interrupt is taken after the current
+	// instruction. If asserted only at T (the last cycle), it's delayed by
+	// one instruction. We model this by having tickFn set `rawIRQ`/`rawNMI`
+	// each cycle, and `Step` snapshotting them into `irqPend`/`nmiPend`
+	// only through the instruction's penultimate cycle.
+	rawIRQ   bool
+	rawNMI   bool
+	irqLatch bool // staged IRQ line, 1 cycle pipeline
+	nmiLatch bool
+}
+
+func (c *CPU) tick() {
+	c.cycles++
+	if c.tickFn != nil {
+		c.tickFn()
+	}
+	// 6502 IRQ sampling: the interrupt line is sampled at phi2 of cycle
+	// T-1, and the decision to take the interrupt is made before the last
+	// cycle of the instruction. If IRQ is asserted at T-1, take after T.
+	// If only asserted at T (last cycle), it's delayed one instruction.
+	// We model this with a 1-cycle rolling latch: `irqPend` is set from
+	// the previous cycle's raw state, so the first instruction boundary
+	// after an IRQ assertion still sees it only if the line was already
+	// low on the cycle before.
+	c.irqPend = c.irqLatch
+	c.irqLatch = c.rawIRQ
+	c.nmiPend = c.nmiPend || c.nmiLatch
+	c.nmiLatch = c.rawNMI
+	c.rawNMI = false // edge-triggered: consume immediately after latching
+}
+
+func (c *CPU) read(addr uint16) byte {
+	v := c.Bus.Read(addr)
+	c.tick()
+	return v
+}
+
+func (c *CPU) write(addr uint16, v byte) {
+	c.Bus.Write(addr, v)
+	c.tick()
 }
 
 type Bus interface {
@@ -239,6 +288,7 @@ func (c *CPU) Reset() {
 	c.A, c.X, c.Y = 0, 0, 0
 	c.S = 0xFD
 	c.P = flagI | flagU
+	// Read reset vector directly via Bus (no tick — PPU not yet running)
 	lo := uint16(c.Bus.Read(0xFFFC))
 	hi := uint16(c.Bus.Read(0xFFFD))
 	c.PC = lo | (hi << 8)
@@ -256,26 +306,26 @@ func (c *CPU) setZN(v byte) {
 }
 
 func (c *CPU) read16(addr uint16) uint16 {
-	lo := uint16(c.Bus.Read(addr))
-	hi := uint16(c.Bus.Read(addr + 1))
+	lo := uint16(c.read(addr))
+	hi := uint16(c.read(addr + 1))
 	return lo | (hi << 8)
 }
 
 // 6502 indirect JMP bug + zero-page wrap helper
 func (c *CPU) read16bug(addr uint16) uint16 {
-	lo := uint16(c.Bus.Read(addr))
-	hi := uint16(c.Bus.Read((addr & 0xFF00) | ((addr + 1) & 0x00FF)))
+	lo := uint16(c.read(addr))
+	hi := uint16(c.read((addr & 0xFF00) | ((addr + 1) & 0x00FF)))
 	return lo | (hi << 8)
 }
 
 func (c *CPU) push(v byte) {
-	c.Bus.Write(0x0100|uint16(c.S), v)
+	c.write(0x0100|uint16(c.S), v)
 	c.S--
 }
 
 func (c *CPU) pop() byte {
 	c.S++
-	return c.Bus.Read(0x0100 | uint16(c.S))
+	return c.read(0x0100 | uint16(c.S))
 }
 
 func (c *CPU) push16(v uint16) {
@@ -300,16 +350,19 @@ func (c *CPU) fetchOperand(mode amode) {
 		c.operand = c.PC
 		c.PC++
 	case amZP:
-		c.operand = uint16(c.Bus.Read(c.PC))
+		c.operand = uint16(c.read(c.PC))
 		c.PC++
 	case amZPX:
-		c.operand = uint16((c.Bus.Read(c.PC) + c.X) & 0xFF)
+		// T2 read zp addr, T3 internal (add X)
+		c.operand = uint16((c.read(c.PC) + c.X) & 0xFF)
 		c.PC++
+		c.tick() // T3 internal add
 	case amZPY:
-		c.operand = uint16((c.Bus.Read(c.PC) + c.Y) & 0xFF)
+		c.operand = uint16((c.read(c.PC) + c.Y) & 0xFF)
 		c.PC++
+		c.tick() // T3 internal add
 	case amREL:
-		off := int8(c.Bus.Read(c.PC))
+		off := int8(c.read(c.PC))
 		c.PC++
 		c.operand = uint16(int32(c.PC) + int32(off))
 	case amABS:
@@ -330,16 +383,19 @@ func (c *CPU) fetchOperand(mode amode) {
 		c.PC += 2
 		c.operand = c.read16bug(ptr)
 	case amIZX:
-		zp := c.Bus.Read(c.PC) + c.X
+		// T2 fetch zp ptr, T3 dummy read at ptr (internal add X), T4/T5 read addr
+		zpRaw := c.read(c.PC)
 		c.PC++
-		lo := uint16(c.Bus.Read(uint16(zp)))
-		hi := uint16(c.Bus.Read(uint16(zp + 1)))
+		c.tick() // T3 internal: add X to zp pointer
+		zp := zpRaw + c.X
+		lo := uint16(c.read(uint16(zp)))
+		hi := uint16(c.read(uint16(zp + 1)))
 		c.operand = lo | (hi << 8)
 	case amIZY:
-		zp := c.Bus.Read(c.PC)
+		zp := c.read(c.PC)
 		c.PC++
-		lo := uint16(c.Bus.Read(uint16(zp)))
-		hi := uint16(c.Bus.Read(uint16(zp + 1)))
+		lo := uint16(c.read(uint16(zp)))
+		hi := uint16(c.read(uint16(zp + 1)))
 		base := lo | (hi << 8)
 		c.operand = base + uint16(c.Y)
 		c.pageCross = pagesDiffer(base, c.operand)
@@ -350,56 +406,46 @@ func (c *CPU) NMI() { c.nmiPend = true }
 func (c *CPU) IRQ() { c.irqPend = true }
 
 func (c *CPU) doNMI() {
+	c.tick() // T1 internal
+	c.tick() // T2 internal
 	c.push16(c.PC)
 	c.push((c.P | flagU) &^ flagB)
 	c.P |= flagI
 	c.PC = c.read16(0xFFFA)
-	c.cycles += 7
 }
 
 func (c *CPU) doIRQ() {
+	c.tick() // T1 internal
+	c.tick() // T2 internal
 	c.push16(c.PC)
 	c.push((c.P | flagU) &^ flagB)
 	c.P |= flagI
 	c.PC = c.read16(0xFFFE)
-	c.cycles += 7
 }
 
 func (c *CPU) Step() int {
 	startCycles := c.cycles
 	if c.stall > 0 {
 		c.stall--
-		c.cycles++
+		c.tick()
 		return 1
 	}
 	if c.nmiPend {
 		c.nmiPend = false
 		c.doNMI()
-		return 7
+		return int(c.cycles - startCycles)
 	}
 	if c.irqPend && c.P&flagI == 0 {
 		c.irqPend = false
 		c.doIRQ()
-		return 7
+		return int(c.cycles - startCycles)
 	}
-	op := c.Bus.Read(c.PC)
+	op := c.read(c.PC)
 	c.PC++
 	info := opTable[op]
 	c.addrMode = info.mode
 	c.fetchOperand(info.mode)
 	info.fn(c)
-	c.cycles += uint64(info.cycles)
-	// Page-cross penalty for reads
-	if c.pageCross {
-		switch op {
-		case 0x7D, 0x79, 0x71, 0x3D, 0x39, 0x31,
-			0xDD, 0xD9, 0xD1, 0x5D, 0x59, 0x51,
-			0xBD, 0xB9, 0xB1, 0xBE, 0xBC, 0xBF,
-			0x1D, 0x19, 0x11, 0xFD, 0xF9, 0xF1,
-			0x1C, 0x3C, 0x5C, 0x7C, 0xDC, 0xFC:
-			c.cycles++
-		}
-	}
 	return int(c.cycles - startCycles)
 }
 
@@ -408,19 +454,19 @@ func (c *CPU) loadOperand() byte {
 	if c.addrMode == amACC {
 		return c.A
 	}
-	return c.Bus.Read(c.operand)
+	return c.read(c.operand)
 }
 func (c *CPU) storeOperand(v byte) {
 	if c.addrMode == amACC {
 		c.A = v
 	} else {
-		c.Bus.Write(c.operand, v)
+		c.write(c.operand, v)
 	}
 }
 
 // --- opcodes ---
-func (c *CPU) opADC() { c.adc(c.Bus.Read(c.operand)) }
-func (c *CPU) opSBC() { c.adc(^c.Bus.Read(c.operand)) }
+func (c *CPU) opADC() { c.loadDummy(); c.adc(c.read(c.operand)) }
+func (c *CPU) opSBC() { c.loadDummy(); c.adc(^c.read(c.operand)) }
 func (c *CPU) adc(v byte) {
 	a := c.A
 	carry := byte(0)
@@ -439,64 +485,82 @@ func (c *CPU) adc(v byte) {
 	c.setZN(c.A)
 }
 
-func (c *CPU) opAND() { c.A &= c.Bus.Read(c.operand); c.setZN(c.A) }
-func (c *CPU) opORA() { c.A |= c.Bus.Read(c.operand); c.setZN(c.A) }
-func (c *CPU) opEOR() { c.A ^= c.Bus.Read(c.operand); c.setZN(c.A) }
+func (c *CPU) opAND() { c.loadDummy(); c.A &= c.read(c.operand); c.setZN(c.A) }
+func (c *CPU) opORA() { c.loadDummy(); c.A |= c.read(c.operand); c.setZN(c.A) }
+func (c *CPU) opEOR() { c.loadDummy(); c.A ^= c.read(c.operand); c.setZN(c.A) }
+
+// RMW (read-modify-write) on memory: read, dummy write old, write new.
+// On accumulator (ACC mode), it's just T1 op + T2 internal.
+// On indexed addressing modes, an extra dummy read at the uncorrected
+// address happens before the real read (regardless of page-cross).
+func (c *CPU) rmw(modify func(byte) byte) {
+	if c.addrMode == amACC {
+		c.tick()
+		c.A = modify(c.A)
+		c.setZN(c.A)
+		return
+	}
+	switch c.addrMode {
+	case amABSX, amABSY, amIZY:
+		c.tick() // dummy read at uncorrected addr (indexed always pays this)
+	}
+	v := c.read(c.operand)
+	c.write(c.operand, v) // dummy write of old value (RMW pipeline)
+	v = modify(v)
+	c.write(c.operand, v)
+	c.setZN(v)
+}
 
 func (c *CPU) opASL() {
-	v := c.loadOperand()
-	c.P &^= flagC
-	if v&0x80 != 0 {
-		c.P |= flagC
-	}
-	v <<= 1
-	c.storeOperand(v)
-	c.setZN(v)
+	c.rmw(func(v byte) byte {
+		c.P &^= flagC
+		if v&0x80 != 0 {
+			c.P |= flagC
+		}
+		return v << 1
+	})
 }
 func (c *CPU) opLSR() {
-	v := c.loadOperand()
-	c.P &^= flagC
-	if v&1 != 0 {
-		c.P |= flagC
-	}
-	v >>= 1
-	c.storeOperand(v)
-	c.setZN(v)
+	c.rmw(func(v byte) byte {
+		c.P &^= flagC
+		if v&1 != 0 {
+			c.P |= flagC
+		}
+		return v >> 1
+	})
 }
 func (c *CPU) opROL() {
-	v := c.loadOperand()
-	oldC := byte(0)
-	if c.P&flagC != 0 {
-		oldC = 1
-	}
-	c.P &^= flagC
-	if v&0x80 != 0 {
-		c.P |= flagC
-	}
-	v = (v << 1) | oldC
-	c.storeOperand(v)
-	c.setZN(v)
+	c.rmw(func(v byte) byte {
+		oldC := byte(0)
+		if c.P&flagC != 0 {
+			oldC = 1
+		}
+		c.P &^= flagC
+		if v&0x80 != 0 {
+			c.P |= flagC
+		}
+		return (v << 1) | oldC
+	})
 }
 func (c *CPU) opROR() {
-	v := c.loadOperand()
-	oldC := byte(0)
-	if c.P&flagC != 0 {
-		oldC = 0x80
-	}
-	c.P &^= flagC
-	if v&1 != 0 {
-		c.P |= flagC
-	}
-	v = (v >> 1) | oldC
-	c.storeOperand(v)
-	c.setZN(v)
+	c.rmw(func(v byte) byte {
+		oldC := byte(0)
+		if c.P&flagC != 0 {
+			oldC = 0x80
+		}
+		c.P &^= flagC
+		if v&1 != 0 {
+			c.P |= flagC
+		}
+		return (v >> 1) | oldC
+	})
 }
 
 func (c *CPU) branch(cond bool) {
 	if cond {
-		c.cycles++
+		c.tick() // taken branch: dummy read at PC
 		if pagesDiffer(c.PC, c.operand) {
-			c.cycles++
+			c.tick() // page cross: dummy read at uncorrected target
 		}
 		c.PC = c.operand
 	}
@@ -511,7 +575,7 @@ func (c *CPU) opBVC() { c.branch(c.P&flagV == 0) }
 func (c *CPU) opBVS() { c.branch(c.P&flagV != 0) }
 
 func (c *CPU) opBIT() {
-	v := c.Bus.Read(c.operand)
+	v := c.read(c.operand)
 	c.P &^= flagZ | flagN | flagV
 	if c.A&v == 0 {
 		c.P |= flagZ
@@ -519,151 +583,229 @@ func (c *CPU) opBIT() {
 	c.P |= v & (flagN | flagV)
 }
 
+// BRK: 7 cycles. T1 op, T2 dummy fetch (PC++), T3 push PCH, T4 push PCL,
+// T5 push P (with B+U), T6 read low vector, T7 read high vector.
 func (c *CPU) opBRK() {
-	c.PC++
+	c.tick()  // T2 dummy fetch (PC was already incremented by Step)
+	c.PC++    // BRK is treated as 2-byte: skip the byte after $00
 	c.push16(c.PC)
 	c.push(c.P | flagB | flagU)
 	c.P |= flagI
 	c.PC = c.read16(0xFFFE)
 }
 
-func (c *CPU) opCLC() { c.P &^= flagC }
-func (c *CPU) opCLD() { c.P &^= flagD }
-func (c *CPU) opCLI() { c.P &^= flagI }
-func (c *CPU) opCLV() { c.P &^= flagV }
-func (c *CPU) opSEC() { c.P |= flagC }
-func (c *CPU) opSED() { c.P |= flagD }
-func (c *CPU) opSEI() { c.P |= flagI }
+// Flag ops: 2 cycles total. T1 opcode (already ticked), T2 internal.
+func (c *CPU) opCLC() { c.tick(); c.P &^= flagC }
+func (c *CPU) opCLD() { c.tick(); c.P &^= flagD }
+func (c *CPU) opCLI() { c.tick(); c.P &^= flagI }
+func (c *CPU) opCLV() { c.tick(); c.P &^= flagV }
+func (c *CPU) opSEC() { c.tick(); c.P |= flagC }
+func (c *CPU) opSED() { c.tick(); c.P |= flagD }
+func (c *CPU) opSEI() { c.tick(); c.P |= flagI }
 
 func (c *CPU) compare(r byte) {
-	v := c.Bus.Read(c.operand)
+	c.loadDummy()
+	v := c.read(c.operand)
 	c.P &^= flagC | flagZ | flagN
 	if r >= v {
 		c.P |= flagC
 	}
 	c.setZN(r - v)
-	// setZN cleared Z/N already above inside; just keep C as set
 }
 func (c *CPU) opCMP() { c.compare(c.A) }
 func (c *CPU) opCPX() { c.compare(c.X) }
 func (c *CPU) opCPY() { c.compare(c.Y) }
 
-func (c *CPU) opDEC() {
-	v := c.Bus.Read(c.operand) - 1
-	c.Bus.Write(c.operand, v)
-	c.setZN(v)
-}
-func (c *CPU) opDEX() { c.X--; c.setZN(c.X) }
-func (c *CPU) opDEY() { c.Y--; c.setZN(c.Y) }
-func (c *CPU) opINC() {
-	v := c.Bus.Read(c.operand) + 1
-	c.Bus.Write(c.operand, v)
-	c.setZN(v)
-}
-func (c *CPU) opINX() { c.X++; c.setZN(c.X) }
-func (c *CPU) opINY() { c.Y++; c.setZN(c.Y) }
+func (c *CPU) opDEC() { c.rmw(func(v byte) byte { return v - 1 }) }
+func (c *CPU) opINC() { c.rmw(func(v byte) byte { return v + 1 }) }
+func (c *CPU) opDEX() { c.tick(); c.X--; c.setZN(c.X) }
+func (c *CPU) opDEY() { c.tick(); c.Y--; c.setZN(c.Y) }
+func (c *CPU) opINX() { c.tick(); c.X++; c.setZN(c.X) }
+func (c *CPU) opINY() { c.tick(); c.Y++; c.setZN(c.Y) }
 
 func (c *CPU) opJMP() { c.PC = c.operand }
-func (c *CPU) opJSR() { c.push16(c.PC - 1); c.PC = c.operand }
-func (c *CPU) opRTS() { c.PC = c.pop16() + 1 }
+
+// JSR: T1 op (already done), T2 read addr lo (in fetchOperand amABS),
+// T3 internal (S register juggle on real hw), T4 push PCH, T5 push PCL,
+// T6 read addr hi (already done in fetchOperand). My fetchOperand reads
+// both addr bytes up front (which absorbs T2 and T6 bus accesses), so
+// here we model only the T3 internal and the two pushes (T4, T5).
+func (c *CPU) opJSR() {
+	c.tick() // T3 internal
+	c.push16(c.PC - 1)
+	c.PC = c.operand
+}
+
+// RTS: T1 op, T2 dummy read PC, T3 increment SP (internal), T4 pop PCL,
+// T5 pop PCH, T6 increment PC (internal).
+func (c *CPU) opRTS() {
+	c.tick() // T2 dummy
+	c.tick() // T3 internal
+	c.PC = c.pop16()
+	c.tick() // T6 internal
+	c.PC++
+}
+
+// RTI: T1 op, T2 dummy read, T3 SP++ (internal), T4 pop P, T5 pop PCL,
+// T6 pop PCH.
 func (c *CPU) opRTI() {
+	c.tick() // T2 dummy
+	c.tick() // T3 internal
 	c.P = (c.pop() &^ flagB) | flagU
 	c.PC = c.pop16()
 }
 
-func (c *CPU) opLDA() { c.A = c.Bus.Read(c.operand); c.setZN(c.A) }
-func (c *CPU) opLDX() { c.X = c.Bus.Read(c.operand); c.setZN(c.X) }
-func (c *CPU) opLDY() { c.Y = c.Bus.Read(c.operand); c.setZN(c.Y) }
-func (c *CPU) opSTA() { c.Bus.Write(c.operand, c.A) }
-func (c *CPU) opSTX() { c.Bus.Write(c.operand, c.X) }
-func (c *CPU) opSTY() { c.Bus.Write(c.operand, c.Y) }
+func (c *CPU) opLDA() { c.loadDummy(); c.A = c.read(c.operand); c.setZN(c.A) }
+func (c *CPU) opLDX() { c.loadDummy(); c.X = c.read(c.operand); c.setZN(c.X) }
+func (c *CPU) opLDY() { c.loadDummy(); c.Y = c.read(c.operand); c.setZN(c.Y) }
 
-func (c *CPU) opNOP() {}
+// STA on indexed/indirect modes always does an extra dummy read at the
+// uncorrected address before the real write — so total cycles include the
+// "page-cross" cycle even when there's no actual page cross.
+func (c *CPU) storeDummy() {
+	switch c.addrMode {
+	case amABSX, amABSY, amIZY:
+		c.tick()
+	}
+}
 
-func (c *CPU) opPHA() { c.push(c.A) }
-func (c *CPU) opPLA() { c.A = c.pop(); c.setZN(c.A) }
-func (c *CPU) opPHP() { c.push(c.P | flagB | flagU) }
-func (c *CPU) opPLP() { c.P = (c.pop() &^ flagB) | flagU }
+// Read-side page-cross dummy: for indexed addressing modes, real hardware
+// does a dummy read at the uncorrected address only when a page boundary
+// is crossed. Add 1 internal cycle to model that.
+func (c *CPU) loadDummy() {
+	if !c.pageCross {
+		return
+	}
+	switch c.addrMode {
+	case amABSX, amABSY, amIZY:
+		c.tick()
+	}
+}
+func (c *CPU) opSTA() { c.storeDummy(); c.write(c.operand, c.A) }
+func (c *CPU) opSTX() { c.storeDummy(); c.write(c.operand, c.X) }
+func (c *CPU) opSTY() { c.storeDummy(); c.write(c.operand, c.Y) }
 
-func (c *CPU) opTAX() { c.X = c.A; c.setZN(c.X) }
-func (c *CPU) opTAY() { c.Y = c.A; c.setZN(c.Y) }
-func (c *CPU) opTSX() { c.X = c.S; c.setZN(c.X) }
-func (c *CPU) opTXA() { c.A = c.X; c.setZN(c.A) }
-func (c *CPU) opTXS() { c.S = c.X }
-func (c *CPU) opTYA() { c.A = c.Y; c.setZN(c.A) }
+func (c *CPU) opNOP() {
+	// Implied/relative NOPs are 2 cy; addressed NOPs do their phantom read
+	// (with optional page-cross dummy).
+	switch c.addrMode {
+	case amIMP, amACC:
+		c.tick()
+	case amIMM:
+		// 2 cy total; opcode + operand read already done
+	default:
+		c.loadDummy()
+		c.read(c.operand)
+	}
+}
+
+// PHA/PHP: T1 op, T2 internal/dummy, T3 push.
+func (c *CPU) opPHA() { c.tick(); c.push(c.A) }
+func (c *CPU) opPHP() { c.tick(); c.push(c.P | flagB | flagU) }
+
+// PLA/PLP: T1 op, T2 internal, T3 SP++ (internal), T4 pop.
+func (c *CPU) opPLA() { c.tick(); c.tick(); c.A = c.pop(); c.setZN(c.A) }
+func (c *CPU) opPLP() { c.tick(); c.tick(); c.P = (c.pop() &^ flagB) | flagU }
+
+// Transfer ops: T1 op, T2 internal (ALU). My read of the opcode is the
+// only bus access; pad 1 internal cycle here.
+func (c *CPU) opTAX() { c.tick(); c.X = c.A; c.setZN(c.X) }
+func (c *CPU) opTAY() { c.tick(); c.Y = c.A; c.setZN(c.Y) }
+func (c *CPU) opTSX() { c.tick(); c.X = c.S; c.setZN(c.X) }
+func (c *CPU) opTXA() { c.tick(); c.A = c.X; c.setZN(c.A) }
+func (c *CPU) opTXS() { c.tick(); c.S = c.X }
+func (c *CPU) opTYA() { c.tick(); c.A = c.Y; c.setZN(c.A) }
 
 // Illegals
 func (c *CPU) opLAX() {
-	v := c.Bus.Read(c.operand)
+	c.loadDummy()
+	v := c.read(c.operand)
 	c.A = v
 	c.X = v
 	c.setZN(v)
 }
-func (c *CPU) opSAX() { c.Bus.Write(c.operand, c.A&c.X) }
-func (c *CPU) opDCP() {
-	v := c.Bus.Read(c.operand) - 1
-	c.Bus.Write(c.operand, v)
-	c.P &^= flagC | flagZ | flagN
-	if c.A >= v {
-		c.P |= flagC
+func (c *CPU) opSAX() { c.write(c.operand, c.A&c.X) }
+// Illegal RMW: read, dummy write old, write modified, then ALU side-effect.
+// Indexed modes pay the same uncorrected-dummy-read cycle as legal RMWs.
+func (c *CPU) rmwSide(modify func(byte) byte, side func(byte)) {
+	switch c.addrMode {
+	case amABSX, amABSY, amIZY:
+		c.tick()
 	}
-	c.setZN(c.A - v)
+	v := c.read(c.operand)
+	c.write(c.operand, v)
+	v = modify(v)
+	c.write(c.operand, v)
+	side(v)
+}
+
+func (c *CPU) opDCP() {
+	c.rmwSide(
+		func(v byte) byte { return v - 1 },
+		func(v byte) {
+			c.P &^= flagC | flagZ | flagN
+			if c.A >= v {
+				c.P |= flagC
+			}
+			c.setZN(c.A - v)
+		})
 }
 func (c *CPU) opISB() {
-	v := c.Bus.Read(c.operand) + 1
-	c.Bus.Write(c.operand, v)
-	c.adc(^v)
+	c.rmwSide(
+		func(v byte) byte { return v + 1 },
+		func(v byte) { c.adc(^v) })
 }
 func (c *CPU) opSLO() {
-	v := c.Bus.Read(c.operand)
-	c.P &^= flagC
-	if v&0x80 != 0 {
-		c.P |= flagC
-	}
-	v <<= 1
-	c.Bus.Write(c.operand, v)
-	c.A |= v
-	c.setZN(c.A)
+	c.rmwSide(
+		func(v byte) byte {
+			c.P &^= flagC
+			if v&0x80 != 0 {
+				c.P |= flagC
+			}
+			return v << 1
+		},
+		func(v byte) { c.A |= v; c.setZN(c.A) })
 }
 func (c *CPU) opRLA() {
-	v := c.Bus.Read(c.operand)
-	oldC := byte(0)
-	if c.P&flagC != 0 {
-		oldC = 1
-	}
-	c.P &^= flagC
-	if v&0x80 != 0 {
-		c.P |= flagC
-	}
-	v = (v << 1) | oldC
-	c.Bus.Write(c.operand, v)
-	c.A &= v
-	c.setZN(c.A)
+	c.rmwSide(
+		func(v byte) byte {
+			oldC := byte(0)
+			if c.P&flagC != 0 {
+				oldC = 1
+			}
+			c.P &^= flagC
+			if v&0x80 != 0 {
+				c.P |= flagC
+			}
+			return (v << 1) | oldC
+		},
+		func(v byte) { c.A &= v; c.setZN(c.A) })
 }
 func (c *CPU) opSRE() {
-	v := c.Bus.Read(c.operand)
-	c.P &^= flagC
-	if v&1 != 0 {
-		c.P |= flagC
-	}
-	v >>= 1
-	c.Bus.Write(c.operand, v)
-	c.A ^= v
-	c.setZN(c.A)
+	c.rmwSide(
+		func(v byte) byte {
+			c.P &^= flagC
+			if v&1 != 0 {
+				c.P |= flagC
+			}
+			return v >> 1
+		},
+		func(v byte) { c.A ^= v; c.setZN(c.A) })
 }
 func (c *CPU) opRRA() {
-	v := c.Bus.Read(c.operand)
-	oldC := byte(0)
-	if c.P&flagC != 0 {
-		oldC = 0x80
-	}
-	c.P &^= flagC
-	if v&1 != 0 {
-		c.P |= flagC
-	}
-	v = (v >> 1) | oldC
-	c.Bus.Write(c.operand, v)
-	c.adc(v)
+	c.rmwSide(
+		func(v byte) byte {
+			oldC := byte(0)
+			if c.P&flagC != 0 {
+				oldC = 0x80
+			}
+			c.P &^= flagC
+			if v&1 != 0 {
+				c.P |= flagC
+			}
+			return (v >> 1) | oldC
+		},
+		func(v byte) { c.adc(v) })
 }
 
 // Debug format (nestest-ish)

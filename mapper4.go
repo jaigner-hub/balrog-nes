@@ -1,5 +1,12 @@
 package main
 
+import (
+	"fmt"
+	"os"
+)
+
+var mmc3LogFile *os.File
+
 // MMC3 (mapper 4). Used by SMB3, Kirby's Adventure, Mega Man 3-6, Crystalis,
 // Dragon Warrior III/IV, Final Fantasy, and many more. Big jump in complexity
 // from MMC1:
@@ -30,8 +37,9 @@ type mapper4 struct {
 	irqFlag   bool // pending IRQ asserted until $E000 acknowledge
 
 	// Diagnostic counters
-	clockCount int
-	irqClocks  int
+	clockCount      int
+	irqClocks       int
+	lastClockFired  bool
 
 	prgBanks int // count of 8KB PRG banks
 	chrBanks int // count of 1KB CHR banks
@@ -116,16 +124,28 @@ func (m *mapper4) WritePRG(addr uint16, v byte) {
 	case addr < 0xE000: // $C000-$DFFF
 		if even {
 			m.irqLatch = v
+			if mmc3LogFile != nil {
+				mmc3LogFile.WriteString(fmt.Sprintf("  $C000 <- latch=%d\n", v))
+			}
 		} else {
 			m.irqCount = 0
 			m.irqReload = true
+			if mmc3LogFile != nil {
+				mmc3LogFile.WriteString("  $C001 <- reload=true count=0\n")
+			}
 		}
 	default: // $E000-$FFFF
 		if even {
 			m.irqEnable = false
 			m.irqFlag = false
+			if mmc3LogFile != nil {
+				mmc3LogFile.WriteString("  $E000 <- irqEnable=false\n")
+			}
 		} else {
 			m.irqEnable = true
+			if mmc3LogFile != nil {
+				mmc3LogFile.WriteString("  $E001 <- irqEnable=true\n")
+			}
 		}
 	}
 }
@@ -207,7 +227,12 @@ func (m *mapper4) Mirror() Mirroring { return m.mirror }
 // PPU cycle 260). Here the PPU calls ClockScanline at end of scanline when
 // BG or sprite rendering is enabled.
 
+// IrqFiredLast returns true if the most recent ClockScanline call asserted IRQ.
+// Used for scanline-tagged IRQ logging in the PPU.
+func (m *mapper4) IrqFiredLast() bool { return m.lastClockFired }
+
 func (m *mapper4) ClockScanline() {
+	m.lastClockFired = false
 	if m.irqCount == 0 || m.irqReload {
 		m.irqCount = m.irqLatch
 		m.irqReload = false
@@ -217,6 +242,7 @@ func (m *mapper4) ClockScanline() {
 	if m.irqCount == 0 && m.irqEnable {
 		m.irqFlag = true
 		m.irqClocks++
+		m.lastClockFired = true
 	}
 	m.clockCount++
 }

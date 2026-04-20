@@ -58,6 +58,12 @@ type Game struct {
 
 	audioPlayer  *audio.Player
 	audioStarted bool
+
+	autoLoadState     bool
+	autoLoadStateDone bool
+	cycPerFrame       bool
+	lastFrameCycles   uint64
+	traceCpuFrame     uint64
 }
 
 // statePath returns the path of the save-state file for the current ROM.
@@ -286,6 +292,11 @@ func (g *Game) loadState() {
 }
 
 func (g *Game) Update() error {
+	// Auto-load savestate once, on the first Update after a ROM is loaded.
+	if g.autoLoadState && !g.autoLoadStateDone && g.nes() != nil {
+		g.loadState()
+		g.autoLoadStateDone = true
+	}
 	// Hotkeys: F1 / Ctrl+O = open file dialog; F5 = reset
 	if inpututil.IsKeyJustPressed(ebiten.KeyF1) ||
 		(ebiten.IsKeyPressed(ebiten.KeyControl) && inpututil.IsKeyJustPressed(ebiten.KeyO)) {
@@ -302,6 +313,29 @@ func (g *Game) Update() error {
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyF4) {
 		g.loadState()
+	}
+	// F11: capture next 4 frames as snap_<frame>_a/b/c/d.png — useful for
+	// diagnosing per-frame flicker in gameplay.
+	if inpututil.IsKeyJustPressed(ebiten.KeyF11) {
+		if nes := g.nes(); nes != nil {
+			start := nes.PPU.FrameCount()
+			for i, suf := range []string{"a", "b", "c", "d"} {
+				g.snaps = append(g.snaps, snapSpec{at: start + uint64(i), path: fmt.Sprintf("snap_%d_%s.png", start, suf)})
+			}
+			g.setStatus("snap burst armed", 2*time.Second)
+		}
+	}
+	// F12: dump IRQ trace for next frame to irqlog.txt
+	if inpututil.IsKeyJustPressed(ebiten.KeyF12) {
+		if nes := g.nes(); nes != nil {
+			f, err := os.Create("irqlog.txt")
+			if err == nil {
+				debugIrqLogFile = f
+				debugIrqLog = true
+				debugIrqFrame = nes.PPU.FrameCount() + 1
+				g.setStatus(fmt.Sprintf("IRQ trace armed for frame %d", debugIrqFrame), 2*time.Second)
+			}
+		}
 	}
 	// Drag-and-drop: load any .nes file dropped on the window.
 	if files := ebiten.DroppedFiles(); files != nil {
@@ -346,7 +380,13 @@ func (g *Game) Update() error {
 	}
 	nes.Bus.Ctrl[0].Buttons = b
 
+	before := nes.CPU.cycles
 	nes.StepFrame()
+	if g.cycPerFrame {
+		fmt.Fprintf(os.Stderr, "frame %d: %d CPU cycles\n", nes.PPU.FrameCount(), nes.CPU.cycles-before)
+	}
+	_ = before
+	_ = g.traceCpuFrame
 	src := nes.PPU.Frame[:]
 	for i, c := range src {
 		o := i * 4
@@ -421,6 +461,14 @@ func (r *apuReader) Read(p []byte) (int, error) {
 }
 
 func main() {
+	// --trace <rom> <out.log>: nestest automation mode. Runs the ROM from
+	// PC=$C000 headless and logs every instruction in nestest.log format.
+	for i, a := range os.Args {
+		if a == "--trace" && i+2 < len(os.Args) {
+			runNestestTrace(os.Args[i+1], os.Args[i+2])
+			return
+		}
+	}
 	g := &Game{
 		screen: ebiten.NewImage(screenW, screenH),
 		pixels: make([]byte, screenW*screenH*4),
@@ -480,6 +528,41 @@ func main() {
 				var n uint64
 				fmt.Sscanf(os.Args[i+1], "%d", &n)
 				g.exitAt = n
+				i++
+			}
+		case "--load-state":
+			// Auto-load the ROM's savestate at startup. Pair with F2 once
+			// to pre-save a useful point (e.g. inside a level), then every
+			// subsequent launch resumes there.
+			g.autoLoadState = true
+		case "--cyc-per-frame":
+			// Diagnostic: print CPU cycles consumed during each frame.
+			g.cycPerFrame = true
+		case "--trace-cpu":
+			// --trace-cpu <frame>: enable full per-instruction trace for
+			// exactly one frame.
+			if i+1 < len(os.Args) {
+				var n uint64
+				fmt.Sscanf(os.Args[i+1], "%d", &n)
+				g.traceCpuFrame = n
+				i++
+			}
+		case "--mmc3-cy":
+			if i+1 < len(os.Args) {
+				fmt.Sscanf(os.Args[i+1], "%d", &mmc3ClockCy)
+				i++
+			}
+		case "--debug-irq":
+			if i+1 < len(os.Args) {
+				var n uint64
+				fmt.Sscanf(os.Args[i+1], "%d", &n)
+				debugIrqLog = true
+				debugIrqFrame = n
+				f, err := os.Create("irqlog.txt")
+				if err == nil {
+					debugIrqLogFile = f
+					mmc3LogFile = f
+				}
 				i++
 			}
 		}

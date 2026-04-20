@@ -195,6 +195,84 @@ func (m *mapper1) restoreBlob(data []byte) error {
 	return nil
 }
 
+// mapper2 (UxROM): just a PRG bank register.
+type mapper2Blob struct{ PrgBank int }
+
+func (m *mapper2) stateBlob() []byte {
+	var buf bytes.Buffer
+	gob.NewEncoder(&buf).Encode(mapper2Blob{PrgBank: m.prgBank})
+	return buf.Bytes()
+}
+func (m *mapper2) restoreBlob(data []byte) error {
+	var b mapper2Blob
+	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&b); err != nil {
+		return err
+	}
+	m.prgBank = b.PrgBank
+	return nil
+}
+
+// mapper3 (CNROM): CHR bank register.
+type mapper3Blob struct{ ChrBank int }
+
+func (m *mapper3) stateBlob() []byte {
+	var buf bytes.Buffer
+	gob.NewEncoder(&buf).Encode(mapper3Blob{ChrBank: m.chrBank})
+	return buf.Bytes()
+}
+func (m *mapper3) restoreBlob(data []byte) error {
+	var b mapper3Blob
+	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&b); err != nil {
+		return err
+	}
+	m.chrBank = b.ChrBank
+	return nil
+}
+
+// mapper4 (MMC3): bank registers, mode bits, mirroring, IRQ counter state,
+// and PRG-RAM.
+type mapper4Blob struct {
+	Banks      [8]byte
+	BankSelect byte
+	PrgMode    byte
+	ChrMode    byte
+	Mirror     int
+	PRGRAM     []byte
+	IRQLatch   byte
+	IRQCount   byte
+	IRQReload  bool
+	IRQEnable  bool
+	IRQFlag    bool
+}
+
+func (m *mapper4) stateBlob() []byte {
+	var buf bytes.Buffer
+	gob.NewEncoder(&buf).Encode(mapper4Blob{
+		Banks: m.banks, BankSelect: m.bankSelect,
+		PrgMode: m.prgMode, ChrMode: m.chrMode,
+		Mirror: int(m.mirror),
+		PRGRAM: append([]byte(nil), m.prgRAM[:]...),
+		IRQLatch: m.irqLatch, IRQCount: m.irqCount,
+		IRQReload: m.irqReload, IRQEnable: m.irqEnable, IRQFlag: m.irqFlag,
+	})
+	return buf.Bytes()
+}
+func (m *mapper4) restoreBlob(data []byte) error {
+	var b mapper4Blob
+	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&b); err != nil {
+		return err
+	}
+	m.banks, m.bankSelect = b.Banks, b.BankSelect
+	m.prgMode, m.chrMode = b.PrgMode, b.ChrMode
+	m.mirror = Mirroring(b.Mirror)
+	if len(b.PRGRAM) == len(m.prgRAM) {
+		copy(m.prgRAM[:], b.PRGRAM)
+	}
+	m.irqLatch, m.irqCount = b.IRQLatch, b.IRQCount
+	m.irqReload, m.irqEnable, m.irqFlag = b.IRQReload, b.IRQEnable, b.IRQFlag
+	return nil
+}
+
 // --- APU state blob ---
 
 type apuBlob struct {
