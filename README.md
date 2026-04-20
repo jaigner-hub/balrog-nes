@@ -22,6 +22,22 @@ Known gaps:
 
 - Battery-backed save RAM is not persisted (Zelda's in-game save writes to PRG-RAM but isn't flushed to disk).
 - MMC3 IRQ clocked at a fixed PPU cycle rather than true A12-edge detection — accurate enough for the games tested but could show a 1-scanline difference from real hardware on games that do clever A12 tricks.
+- Mapper 5 (MMC5) not implemented — *Castlevania III*, *Just Breed* won't run.
+- PPU VBL-flag set timing is off by one cycle on blargg's sensitive `ppu_vbl_nmi` sub-test (not visible in any game I've tried).
+
+## Test ROM results
+
+Run against [blargg's NES test ROM suite](https://github.com/christopherpow/nes-test-roms):
+
+| Test                            | Result |
+|---------------------------------|--------|
+| `instr_test-v5` (16 sub-tests)  | ✅ all pass |
+| `cpu_timing_test6`              | ✅ pass |
+| `sprite_hit_tests` (11 sub-tests) | ✅ all pass |
+| `ppu_vbl_nmi` (10 sub-tests)    | ⚠️ 9/10 (fails `02-vbl_set_time`) |
+| `mmc3_test_2` (6 sub-tests)     | ⚠️ 1/6 (fails A12-edge sub-tests; uses fixed-cycle clock) |
+
+Real-game sanity checks pass: *Super Mario Bros.*, *Super Mario Bros. 3*, *The Legend of Zelda*, *Battletoads*, *Castlevania*, *Mike Tyson's Punch-Out!!*, *Marble Madness*, and more.
 
 ## Build
 

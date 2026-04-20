@@ -35,3 +35,12 @@ Thumbs.db
 
 # Claude Code per-machine settings
 .claude/settings.local.json
+
+# Test ROM suite (external, large)
+testroms/
+
+# Test output snapshots
+test_*.png
+sh_*.png
+mmc3_*.png
+vbl*.png
