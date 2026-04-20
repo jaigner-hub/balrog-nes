@@ -570,11 +570,6 @@ func main() {
 				g.traceCpuFrame = n
 				i++
 			}
-		case "--mmc3-cy":
-			if i+1 < len(os.Args) {
-				fmt.Sscanf(os.Args[i+1], "%d", &mmc3ClockCy)
-				i++
-			}
 		case "--debug-irq":
 			if i+1 < len(os.Args) {
 				var n uint64

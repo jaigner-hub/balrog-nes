@@ -14,7 +14,7 @@ Working:
 - **Cycle-driven CPU–PPU interleaving** — every CPU bus access ticks the PPU 3 times and APU 1 time via a tick callback, so register writes land at the correct PPU cycle within each instruction. OAM DMA also ticks per cycle (513/514 cycles depending on CPU parity).
 - **PPU (2C02)** — cycle-accurate background + sprite rendering: 16-bit BG shift registers with correct attribute latch loading, sprite-0 hit, sprite overflow, 8×8 and 8×16 sprites, OAMDMA. NTSC odd-frame cycle skip so CPU/PPU stay phase-locked across frames.
 - **APU (2A03)** — pulse ×2 (envelope + sweep), triangle, noise, DMC (sample playback with IRQ). Approximation of the NES analog filter chain (90 Hz HP → 440 Hz HP → 14 kHz LP).
-- **Mappers** — NROM (0), MMC1 (1), UxROM (2), CNROM (3), MMC3 (4). MMC3's scanline IRQ is used by SMB3, Kirby's Adventure, Mega Man 3–6, and many others for status-bar splits. balrog's SMB3 title scroll split is pixel-matched to Mesen, and the in-game status-bar boundary is cleaner than Mesen's: Mesen still exhibits a small couple-pixel per-frame flicker at that boundary on SMB3; balrog eliminates it entirely with the current MMC3 clock cycle tuning.
+- **Mappers** — NROM (0), MMC1 (1), UxROM (2), CNROM (3), MMC3 (4), AxROM (7). MMC3's scanline IRQ is clocked by real A12 rising edges (no cycle-count hack), with a 12-PPU-cycle low-time filter. SMB3's in-game status-bar boundary is stable; the title-screen scroll split still shows a 1-scanline offset versus Mesen that's tied to NMI sub-cycle timing we haven't yet fully matched.
 - **Input** — keyboard and standard gamepads (8BitDo, Xbox, DualShock — anything Ebiten recognizes).
 - **Frontend** — native file-open dialog, drag-and-drop ROM loading, reset, save states.
 
@@ -36,6 +36,7 @@ Run against [blargg's NES test ROM suite](https://github.com/christopherpow/nes-
 | `sprite_hit_tests` (11 sub-tests) | ✅ all pass |
 | `ppu_vbl_nmi` (10 sub-tests)    | ⚠️ 9/10 (fails `02-vbl_set_time`) |
 | `mmc3_test_2` (6 sub-tests)     | ⚠️ 4/6 (1/2/3/5 pass; 4 is cycle-exact IRQ timing, 6 tests the Rev A chip variant) |
+| `nestest.nes` automation (8990 instructions) | ✅ CPU trace matches reference `nestest.log` exactly (CPU + PPU position + CYC) |
 
 Real-game sanity checks pass: *Super Mario Bros.*, *Super Mario Bros. 3*, *The Legend of Zelda*, *Battletoads*, *Castlevania*, *Mike Tyson's Punch-Out!!*, *Marble Madness*, and more.
 

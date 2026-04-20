@@ -101,12 +101,6 @@ var debugIrqLog = false
 var debugIrqFrame uint64 = 500
 var debugIrqLogFile *os.File
 
-// MMC3 scanline clock cycle. cy=200 is the empirical sweet spot:
-//   - Title scroll split: pixel-matched to Mesen, zero inter-frame flicker
-//   - Gameplay status-bar boundary: zero inter-frame flicker
-// cy>=260 (real A12 timing) breaks the title (CPU ISR slightly too slow)
-// and cy<=180 leaves some variance in gameplay; cy=240 destabilizes title.
-var mmc3ClockCy = 200
 
 const (
 	ctrlNmi       = 0x80
@@ -179,6 +173,7 @@ func (p *PPU) observeA12(addr uint16) {
 }
 
 func (p *PPU) vramRead(addr uint16) byte {
+	p.observeA12(addr)
 	addr &= 0x3FFF
 	switch {
 	case addr < 0x2000:
@@ -196,6 +191,7 @@ func (p *PPU) vramRead(addr uint16) byte {
 }
 
 func (p *PPU) vramWrite(addr uint16, v byte) {
+	p.observeA12(addr)
 	addr &= 0x3FFF
 	switch {
 	case addr < 0x2000:
@@ -217,6 +213,17 @@ func (p *PPU) CPURead(addr uint16) byte {
 	reg := addr & 7
 	switch reg {
 	case 2: // PPUSTATUS
+		// VBL/NMI suppression race. A $2002 read at the exact set cycle
+		// suppresses the flag entirely; reads 1–2 cycles later see the
+		// flag but kill the pending NMI.
+		switch {
+		case p.scanline == 241 && p.cycle == 0:
+			// CPU reads right before the VBL set tick → suppress.
+			p.vblSuppress = true
+		case p.scanline == 241 && (p.cycle == 1 || p.cycle == 2):
+			// Flag is already set; clear NMI propagation.
+			p.NMIPending = false
+		}
 		r := (p.status & 0xE0) | (p.busLat & 0x1F)
 		p.status &^= statVBlank
 		p.w = 0
@@ -228,8 +235,6 @@ func (p *PPU) CPURead(addr uint16) byte {
 		return r
 	case 7: // PPUDATA
 		a := p.v & 0x3FFF
-		// Observe A12 on the bus address used for the read itself.
-		p.observeA12(a)
 		var r byte
 		if a < 0x3F00 {
 			r = p.dataBuf
@@ -243,7 +248,7 @@ func (p *PPU) CPURead(addr uint16) byte {
 		} else {
 			p.v++
 		}
-		// And on the post-increment v, since that's what drives A12 next.
+		// v increment drives A12 on the bus for the next access.
 		p.observeA12(p.v)
 		p.busLat = r
 		return r
@@ -290,13 +295,11 @@ func (p *PPU) CPUWrite(addr uint16, val byte) {
 			p.t = (p.t & 0xFF00) | uint16(val)
 			p.v = p.t
 			p.w = 0
-			// Second $2006 write updates v which drives A12 directly on
-			// real hardware — MMC3's edge-filtered counter sees this.
+			// Second $2006 write updates v which drives A12 on the VRAM bus.
+			// MMC3's edge detector sees it.
 			p.observeA12(p.v)
 		}
 	case 7:
-		// Observe A12 both on the write address and the post-increment v.
-		p.observeA12(p.v & 0x3FFF)
 		p.vramWrite(p.v&0x3FFF, val)
 		if p.ctrl&ctrlVramInc != 0 {
 			p.v += 32
@@ -632,16 +635,21 @@ func (p *PPU) Step() {
 	renderLine := visible || preRender
 	renderingOn := p.mask&(maskShowBg|maskShowSpr) != 0
 
-	// VBlank start
+	// VBlank start — unless a $2002 read during the previous CPU cycle
+	// suppressed it.
 	if p.scanline == 241 && p.cycle == 1 {
-		p.status |= statVBlank
-		if p.ctrl&ctrlNmi != 0 {
-			p.NMIPending = true
+		if !p.vblSuppress {
+			p.status |= statVBlank
+			if p.ctrl&ctrlNmi != 0 {
+				p.NMIPending = true
+			}
 		}
+		p.vblSuppress = false
 	}
-	// Pre-render cycle 1: clear status flags
+	// Pre-render cycle 1: clear status flags + any lingering suppress.
 	if preRender && p.cycle == 1 {
 		p.status &^= statVBlank | statSpr0 | statSprOv
+		p.vblSuppress = false
 	}
 
 	if renderLine && renderingOn {
@@ -710,16 +718,9 @@ func (p *PPU) Step() {
 		// instead to give the CPU's atomic-instruction IRQ response more
 		// breathing room before the next scanline's first-tile fetch deadline
 		// (~cycle 321). With cy=260 the deadline is only ~61 PPU cycles
-		// MMC3 scanline clock. During normal rendering we use a fixed PPU
-		// cycle (cy=200) to clock the counter — this matches SMB3's
-		// Mesen-correct title timing. CPU-driven A12 toggles (from $2006 /
-		// $2007 accesses) are handled separately by observeA12(), so the
-		// mmc3_test_2 sub-tests that target those still pass.
-		if p.cycle == mmc3ClockCy && (visible || preRender) {
-			if sc, ok := p.cart.mapper.(scanlineCounter); ok {
-				sc.ClockScanline()
-			}
-		}
+		// MMC3 IRQ counter is clocked entirely by A12 rising edges in
+		// observeA12() — natural ones from BG/sprite pattern fetches and
+		// CPU-driven ones from $2006 / $2007 accesses.
 		// Latch "has sprite 0" for the scanline we're about to start
 		// rendering (happens as sprite 0's sprite-0 flag gets carried
 		// through the fetch).
@@ -733,18 +734,20 @@ func (p *PPU) Step() {
 		p.Frame[p.scanline*256+p.cycle-1] = nesPalette[p.palette[0]&0x3F]
 	}
 
-	// A12 low-time accumulator for the MMC3 edge filter. Counts cycles
-	// where A12 has been low (i.e. no high-addr bus access has driven
-	// A12 high this cycle).
+	// A12 low-time accumulator for the MMC3 edge filter. A12 stays at
+	// whatever value the last bus access set it to; this advances the
+	// "has been low for N cycles" counter when no high-addr access reset
+	// it this cycle.
 	if !p.a12High {
 		p.a12LowCycles++
 	}
 
-	// Advance. NTSC odd-frame cycle skip: on odd frames with rendering
-	// enabled, the pre-render line (sc=261) ends at cycle 339 instead of
-	// 340. This shaves 1 PPU cycle per odd frame, keeping CPU/PPU aligned
-	// to the NTSC color clock and removing a 2-frame timing drift.
-	if preRender && p.cycle == 339 && p.odd && renderingOn {
+	// Advance. NTSC odd-frame cycle skip: on odd frames with BG rendering
+	// enabled, the pre-render scanline is 340 cycles instead of 341 — the
+	// cycle that would have been cy=340 is skipped. We handle that by
+	// jumping straight to sc=0 cy=0 at the end of cy=339. (blargg's
+	// 10-even_odd_timing test is sensitive to this cycle being correct.)
+	if preRender && p.cycle == 339 && p.odd && p.mask&maskShowBg != 0 {
 		p.cycle = 0
 		p.scanline = 0
 		p.frame++

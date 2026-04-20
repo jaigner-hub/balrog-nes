@@ -42,14 +42,13 @@ func NewNES(cart *Cart, sampleRate float64) *NES {
 		n.PPU.Step()
 		n.PPU.Step()
 		n.PPU.Step()
-		// Sample interrupt lines this cycle. NMI is edge-triggered so we
-		// latch it on the rising edge. IRQ is level-triggered — track the
-		// live line state each cycle; `Step` decides when to actually take
-		// the interrupt based on instruction-cycle position (T-1 phi2).
+		// NMI edge into the CPU's 1-cycle sampling pipeline.
 		if n.PPU.NMIPending {
 			n.PPU.NMIPending = false
 			n.CPU.rawNMI = true
 		}
+		// IRQ is level-triggered. Reflect the live state; Step's 1-cycle
+		// latch models T-1 phi2 sampling.
 		irq := false
 		if n.APU.DMC.irqPending {
 			irq = true

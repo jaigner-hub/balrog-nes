@@ -36,16 +36,14 @@ type CPU struct {
 	// with internal cycles tick explicitly.
 	tickFn func()
 
-	// IRQ/NMI sampling — real 6502 samples the interrupt lines at phi2 of
-	// the penultimate cycle (T-1) of each instruction, not at the final
-	// cycle. If asserted at T-1, the interrupt is taken after the current
-	// instruction. If asserted only at T (the last cycle), it's delayed by
-	// one instruction. We model this by having tickFn set `rawIRQ`/`rawNMI`
-	// each cycle, and `Step` snapshotting them into `irqPend`/`nmiPend`
-	// only through the instruction's penultimate cycle.
+	// IRQ (level) + NMI (edge) sampling. tickFn writes rawIRQ/rawNMI
+	// at the end of cycle T; the end of the same tick then latches them
+	// into irqPend/nmiPend, which are seen by Step at the start of the
+	// following instruction. Net delay from interrupt assertion to the
+	// interrupt sequence beginning: 1 cycle + the rest of the current
+	// instruction — matching real 6502's T-1 phi2 edge detector.
 	rawIRQ   bool
 	rawNMI   bool
-	irqLatch bool // staged IRQ line, 1 cycle pipeline
 	nmiLatch bool
 }
 
@@ -54,19 +52,13 @@ func (c *CPU) tick() {
 	if c.tickFn != nil {
 		c.tickFn()
 	}
-	// 6502 IRQ sampling: the interrupt line is sampled at phi2 of cycle
-	// T-1, and the decision to take the interrupt is made before the last
-	// cycle of the instruction. If IRQ is asserted at T-1, take after T.
-	// If only asserted at T (last cycle), it's delayed one instruction.
-	// We model this with a 1-cycle rolling latch: `irqPend` is set from
-	// the previous cycle's raw state, so the first instruction boundary
-	// after an IRQ assertion still sees it only if the line was already
-	// low on the cycle before.
-	c.irqPend = c.irqLatch
-	c.irqLatch = c.rawIRQ
-	c.nmiPend = c.nmiPend || c.nmiLatch
-	c.nmiLatch = c.rawNMI
-	c.rawNMI = false // edge-triggered: consume immediately after latching
+	// Sample lines at end of cycle T (phi2 of T). The CPU checks these
+	// between instructions.
+	c.irqPend = c.rawIRQ
+	if c.rawNMI {
+		c.nmiPend = true
+		c.rawNMI = false
+	}
 }
 
 func (c *CPU) read(addr uint16) byte {
@@ -692,7 +684,9 @@ func (c *CPU) opNOP() {
 	case amIMP, amACC:
 		c.tick()
 	case amIMM:
-		// 2 cy total; opcode + operand read already done
+		// Undocumented NOP-imm ($80/$82/$89/$C2/$E2) reads the immediate
+		// operand (and discards it). That read supplies the 2nd cycle.
+		c.read(c.operand)
 	default:
 		c.loadDummy()
 		c.read(c.operand)
