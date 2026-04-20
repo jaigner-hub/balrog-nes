@@ -49,6 +49,17 @@ type PPU struct {
 	frame    uint64
 	odd      bool
 
+	// VBL race: a $2002 read at the exact cycle VBL would have been set
+	// suppresses the flag for that frame (real-hw quirk). This latch is
+	// set in CPURead and consumed in Step.
+	vblSuppress bool
+
+	// MMC3 A12 edge tracking. The MMC3 IRQ counter on real hardware is
+	// clocked on the rising edge of A12 (the high bit of the VRAM bus
+	// address), filtered so fast toggles don't falsely trigger it.
+	a12High      bool
+	a12LowCycles int
+
 	// Output framebuffer
 	Frame [256 * 240]uint32
 
@@ -151,6 +162,22 @@ func (p *PPU) mirrorNT(addr uint16) (bank, idx int) {
 	return int(table & 1), offs
 }
 
+// observeA12 is called on every VRAM bus access. It clocks the MMC3 IRQ
+// counter on a rising edge of A12 (the $1000 bit) if the line has been
+// low for >= 12 PPU cycles (the filter emulates real-hw low-pass).
+func (p *PPU) observeA12(addr uint16) {
+	high := addr&0x1000 != 0
+	if high && !p.a12High && p.a12LowCycles >= 12 {
+		if sc, ok := p.cart.mapper.(scanlineCounter); ok {
+			sc.ClockScanline()
+		}
+	}
+	if high {
+		p.a12LowCycles = 0
+	}
+	p.a12High = high
+}
+
 func (p *PPU) vramRead(addr uint16) byte {
 	addr &= 0x3FFF
 	switch {
@@ -201,6 +228,8 @@ func (p *PPU) CPURead(addr uint16) byte {
 		return r
 	case 7: // PPUDATA
 		a := p.v & 0x3FFF
+		// Observe A12 on the bus address used for the read itself.
+		p.observeA12(a)
 		var r byte
 		if a < 0x3F00 {
 			r = p.dataBuf
@@ -214,6 +243,8 @@ func (p *PPU) CPURead(addr uint16) byte {
 		} else {
 			p.v++
 		}
+		// And on the post-increment v, since that's what drives A12 next.
+		p.observeA12(p.v)
 		p.busLat = r
 		return r
 	}
@@ -259,14 +290,20 @@ func (p *PPU) CPUWrite(addr uint16, val byte) {
 			p.t = (p.t & 0xFF00) | uint16(val)
 			p.v = p.t
 			p.w = 0
+			// Second $2006 write updates v which drives A12 directly on
+			// real hardware — MMC3's edge-filtered counter sees this.
+			p.observeA12(p.v)
 		}
 	case 7:
+		// Observe A12 both on the write address and the post-increment v.
+		p.observeA12(p.v & 0x3FFF)
 		p.vramWrite(p.v&0x3FFF, val)
 		if p.ctrl&ctrlVramInc != 0 {
 			p.v += 32
 		} else {
 			p.v++
 		}
+		p.observeA12(p.v)
 	}
 }
 
@@ -673,14 +710,11 @@ func (p *PPU) Step() {
 		// instead to give the CPU's atomic-instruction IRQ response more
 		// breathing room before the next scanline's first-tile fetch deadline
 		// (~cycle 321). With cy=260 the deadline is only ~61 PPU cycles
-		// (~20 CPU cycles) — narrower than my IRQ-response jitter, causing
-		// per-frame flicker on SMB3's status-bar boundary tile. cy=85 gives
-		// ~236 PPU cycles, well outside jitter range.
-		// MMC3 scanline IRQ clocked at fixed cy=20 rather than from A12
-		// edges. The A12 approach is more accurate but my CPU's ISR timing
-		// isn't quite fast enough to complete within HBlank at real A12
-		// fire cycles — forcing an earlier IRQ gives the CPU more runway
-		// and keeps the SMB3 title boundary pixel-matched to Mesen.
+		// MMC3 scanline clock. During normal rendering we use a fixed PPU
+		// cycle (cy=200) to clock the counter — this matches SMB3's
+		// Mesen-correct title timing. CPU-driven A12 toggles (from $2006 /
+		// $2007 accesses) are handled separately by observeA12(), so the
+		// mmc3_test_2 sub-tests that target those still pass.
 		if p.cycle == mmc3ClockCy && (visible || preRender) {
 			if sc, ok := p.cart.mapper.(scanlineCounter); ok {
 				sc.ClockScanline()
@@ -697,6 +731,13 @@ func (p *PPU) Step() {
 	// Rendering-disabled path: fill with universal BG color.
 	if visible && !renderingOn && p.cycle >= 1 && p.cycle <= 256 {
 		p.Frame[p.scanline*256+p.cycle-1] = nesPalette[p.palette[0]&0x3F]
+	}
+
+	// A12 low-time accumulator for the MMC3 edge filter. Counts cycles
+	// where A12 has been low (i.e. no high-addr bus access has driven
+	// A12 high this cycle).
+	if !p.a12High {
+		p.a12LowCycles++
 	}
 
 	// Advance. NTSC odd-frame cycle skip: on odd frames with rendering

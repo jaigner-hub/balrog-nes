@@ -35,7 +35,7 @@ Run against [blargg's NES test ROM suite](https://github.com/christopherpow/nes-
 | `cpu_timing_test6`              | ✅ pass |
 | `sprite_hit_tests` (11 sub-tests) | ✅ all pass |
 | `ppu_vbl_nmi` (10 sub-tests)    | ⚠️ 9/10 (fails `02-vbl_set_time`) |
-| `mmc3_test_2` (6 sub-tests)     | ⚠️ 1/6 (fails A12-edge sub-tests; uses fixed-cycle clock) |
+| `mmc3_test_2` (6 sub-tests)     | ⚠️ 4/6 (1/2/3/5 pass; 4 is cycle-exact IRQ timing, 6 tests the Rev A chip variant) |
 
 Real-game sanity checks pass: *Super Mario Bros.*, *Super Mario Bros. 3*, *The Legend of Zelda*, *Battletoads*, *Castlevania*, *Mike Tyson's Punch-Out!!*, *Marble Madness*, and more.
 

@@ -231,6 +231,12 @@ func (m *mapper4) Mirror() Mirroring { return m.mirror }
 // Used for scanline-tagged IRQ logging in the PPU.
 func (m *mapper4) IrqFiredLast() bool { return m.lastClockFired }
 
+// ClockScanline emulates MMC3 Rev B IRQ semantics (SMB3, Mega Man 3):
+// reload the counter from the latch if it's zero (or $C001's pending-
+// reload flag is set), otherwise decrement. After that, fire the IRQ
+// if the counter ended at zero and IRQ is enabled. Rev A's
+// "don't-fire-on-natural-reload" quirk (blargg test 6-MMC3_alt) is
+// intentionally not modeled — the games I care about are Rev B.
 func (m *mapper4) ClockScanline() {
 	m.lastClockFired = false
 	if m.irqCount == 0 || m.irqReload {
