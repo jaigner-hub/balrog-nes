@@ -1,5 +1,7 @@
 # balrog
 
+![balrog running Super Mario Bros. 3](docs/smb3-window.png)
+
 A small NES emulator written in Go using [Ebitengine](https://ebitengine.org/) for the window, input, and audio.
 
 Built end-to-end in a single live session as a learning project. Runs *Super Mario Bros.*, *The Legend of Zelda*, *Super Mario Bros. 3*, and other mapper 0–4 ROMs with picture, sound, and controllers.

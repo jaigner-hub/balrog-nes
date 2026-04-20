@@ -17,6 +17,7 @@ balrog
 
 # Snapshots / debug captures
 *.png
+!docs/*.png
 
 # Runtime diagnostic logs
 *.log
